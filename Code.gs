@@ -69,6 +69,7 @@ function onOpen() {
     .addItem('List all Lists with time entries', 'listAllListsWithEntries')
     .addSeparator()
     .addItem('Sync pending changes', 'syncPendingChanges')
+    .addItem('Sync & Reload', 'syncAndReload')
     .addItem('Discard pending changes', 'discardPendingChanges')
     .addSeparator()
     .addItem('Setup config sheet', 'setupConfigSheet')
@@ -88,7 +89,7 @@ function setupConfigSheet() {
     ['Setting', 'Value', 'Notes'],
     ['API Token', '', 'Your ClickUp personal API token (pk_...)'],
     ['Team ID', '', 'Workspace ID from app.clickup.com/{team_id}/...'],
-    ['List ID', '', 'List ID from the List link (ends in /li/{list_id})'],
+    ['List ID', '', 'Run "List all Lists" first, then pick from dropdown'],
     ['Preset', 'Previous month', 'Pick from dropdown'],
     ['Custom start date', '', 'Only used if Preset = Custom (YYYY-MM-DD)'],
     ['Custom end date', '', 'Only used if Preset = Custom (YYYY-MM-DD), inclusive'],
@@ -140,14 +141,17 @@ function setupConfigSheet() {
 function readConfig() {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG_SHEET);
   if (!sheet) throw new Error('No Config sheet. Run "Setup config sheet" first.');
-  const values = sheet.getRange(2, 1, 8, 2).getValues();
+  const values = sheet.getRange(2, 1, 9, 2).getValues();
   const map = {};
   values.forEach(([k, v]) => { map[k] = v; });
+
+  var rawListId = String(map['List ID'] || '').trim();
 
   const cfg = {
     token: String(map['API Token'] || '').trim(),
     teamId: String(map['Team ID'] || '').trim(),
-    listId: String(map['List ID'] || '').trim(),
+    listId: resolveListId_(rawListId),
+    listLabel: rawListId,
     preset: String(map['Preset'] || '').trim(),
     customStart: map['Custom start date'],
     customEnd: map['Custom end date'],
@@ -160,6 +164,30 @@ function readConfig() {
   if (!PRESETS.includes(cfg.preset)) throw new Error('Preset must be one of: ' + PRESETS.join(', '));
   if (!BILLABLE_FILTERS.includes(cfg.billableFilter)) throw new Error('Billable filter must be one of: ' + BILLABLE_FILTERS.join(', '));
   return cfg;
+}
+
+/**
+ * Resolves the List ID value from Config B4.
+ * If it looks like a display label from the dropdown, looks up the ID in Lists Found.
+ * Returns the numeric List ID string, or empty string if blank.
+ */
+function resolveListId_(raw) {
+  if (!raw) return '';
+  // If it's purely numeric, treat as a raw List ID (backward compat)
+  if (/^\d+$/.test(raw)) return raw;
+  // Otherwise it's a display label — look it up in Lists Found
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var listsSheet = ss.getSheetByName(LISTS_SHEET);
+  if (!listsSheet || listsSheet.getLastRow() < 2) {
+    throw new Error('Lists Found sheet is empty. Run "List all Lists with time entries" first.');
+  }
+  var lastRow = listsSheet.getLastRow();
+  var data = listsSheet.getRange(2, 1, lastRow - 1, 8).getValues(); // cols: name, id, folder, space, ..., ..., ..., label
+  for (var i = 0; i < data.length; i++) {
+    var label = String(data[i][7] || ''); // column 8 = Display Label
+    if (label === raw) return String(data[i][1]); // column 2 = List ID
+  }
+  throw new Error('Could not find a matching List for "' + raw + '" in the Lists Found sheet. Try running "List all Lists with time entries" again.');
 }
 
 // ---------- Date range ----------
@@ -303,21 +331,23 @@ function entryToRow(e, tz) {
 
 // ---------- Refresh ----------
 
-function refreshTimeEntries() {
-  // Check for pending changes first
-  var pendingCount = countPendingRows_();
-  if (pendingCount > 0) {
-    var ui = SpreadsheetApp.getUi();
-    var resp = ui.alert(
-      'Pending changes',
-      'You have ' + pendingCount + ' row(s) with pending changes. Refreshing will discard them.\n\n' +
-      'YES = Sync first (run "Sync pending changes" before refreshing).\n' +
-      'NO = Refresh anyway (discards pending edits).\n' +
-      'CANCEL = Stop, do nothing.',
-      ui.ButtonSet.YES_NO_CANCEL
-    );
-    if (resp === ui.Button.YES) { syncPendingChanges(); return; }
-    if (resp !== ui.Button.NO) return;
+function refreshTimeEntries(skipPendingCheck) {
+  // Check for pending changes first (unless called from syncAndReload)
+  if (!skipPendingCheck) {
+    var pendingCount = countPendingRows_();
+    if (pendingCount > 0) {
+      var ui = SpreadsheetApp.getUi();
+      var resp = ui.alert(
+        'Pending changes',
+        'You have ' + pendingCount + ' row(s) with pending changes. Refreshing will discard them.\n\n' +
+        'YES = Sync first (run "Sync pending changes" before refreshing).\n' +
+        'NO = Refresh anyway (discards pending edits).\n' +
+        'CANCEL = Stop, do nothing.',
+        ui.ButtonSet.YES_NO_CANCEL
+      );
+      if (resp === ui.Button.YES) { syncPendingChanges(); return; }
+      if (resp !== ui.Button.NO) return;
+    }
   }
 
   var cfg = readConfig();
@@ -394,15 +424,48 @@ function listAllListsWithEntries() {
   var sheet = ss.getSheetByName(LISTS_SHEET);
   if (!sheet) sheet = ss.insertSheet(LISTS_SHEET);
   sheet.clear();
-  var header = ['List name', 'List ID', 'Folder', 'Space', '# entries', 'Total hours', 'Range'];
+  var header = ['List name', 'List ID', 'Folder', 'Space', '# entries', 'Total hours', 'Range', 'Display Label'];
   sheet.getRange(1, 1, 1, header.length).setValues([header]).setFontWeight('bold');
   if (rows.length > 0) {
-    var data = rows.map(function(r){ return [r.name, r.id, r.folder, r.space, r.count, Math.round(r.hours * 100) / 100, range.label]; });
+    var data = rows.map(function(r){
+      return [r.name, r.id, r.folder, r.space, r.count, Math.round(r.hours * 100) / 100, range.label, buildListLabel_(r)];
+    });
     sheet.getRange(2, 1, data.length, header.length).setValues(data);
   }
   sheet.setFrozenRows(1);
   sheet.autoResizeColumns(1, header.length);
-  SpreadsheetApp.getActive().toast('Found ' + rows.length + ' Lists. See "' + LISTS_SHEET + '" tab.', 'ClickUp', 6);
+
+  // Populate Config B4 dropdown with display labels
+  applyListIdDropdown_(rows);
+
+  SpreadsheetApp.getActive().toast('Found ' + rows.length + ' Lists. See "' + LISTS_SHEET + '" tab. Config "List ID" dropdown updated.', 'ClickUp', 6);
+}
+
+/**
+ * Build a human-readable label for a list entry: "Name (Space > Folder)".
+ */
+function buildListLabel_(r) {
+  var path = [];
+  if (r.space) path.push(r.space);
+  if (r.folder) path.push(r.folder);
+  if (path.length > 0) return r.name + ' (' + path.join(' > ') + ')';
+  return r.name;
+}
+
+/**
+ * Apply the List ID dropdown on Config B4 using display labels from Lists Found rows.
+ */
+function applyListIdDropdown_(rows) {
+  if (!rows || rows.length === 0) return;
+  var labels = rows.map(function(r){ return buildListLabel_(r); });
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var configSheet = ss.getSheetByName(CONFIG_SHEET);
+  if (!configSheet) return;
+  var rule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(labels, true)
+    .setAllowInvalid(false) // dropdown only — reject manual input
+    .build();
+  configSheet.getRange('B4').setDataValidation(rule);
 }
 
 // ---------- Tag list ----------
@@ -508,30 +571,30 @@ function countPendingRows_() {
 
 // ---------- Sync ----------
 
-function syncPendingChanges() {
+/**
+ * Collect pending changes from the Time Entries sheet.
+ * @param {boolean} requireConfirm — if true, only rows with Confirm=true; if false, all pending rows.
+ * @returns {{sheet: Sheet, changes: Object[]}}
+ */
+function collectChanges_(requireConfirm) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName(DATA_SHEET);
-  if (!sheet || sheet.getLastRow() < 2) {
-    SpreadsheetApp.getActive().toast('No data.', 'ClickUp');
-    return;
-  }
+  if (!sheet || sheet.getLastRow() < 2) return { sheet: sheet, changes: [] };
 
   var lastRow = sheet.getLastRow();
   var data = sheet.getRange(2, 1, lastRow - 1, COLUMNS.length).getValues();
-
-  // Collect changes for rows that are both confirmed AND pending
   var changes = [];
   data.forEach(function(r, idx) {
     var pending = String(r[PENDING_COL - 1] || '').trim();
-    var confirmed = r[CONFIRM_COL - 1] === true;
-    if (!pending || !confirmed) return;
+    if (!pending) return;
+    if (requireConfirm && r[CONFIRM_COL - 1] !== true) return;
     var snap = null;
     try { snap = JSON.parse(r[SNAPSHOT_COL - 1] || '{}'); } catch (err) { snap = null; }
     changes.push({
       rowInSheet: idx + 2,
       entryId: String(r[ENTRY_ID_COL - 1] || '').trim(),
-      taskId: String(r[1] || ''),   // column 2: Task ID (custom or internal)
-      taskName: String(r[2] || ''), // column 3: Task Name
+      taskId: String(r[1] || ''),
+      taskName: String(r[2] || ''),
       pending: pending,
       snap: snap,
       newDesc: String(r[DESCRIPTION_COL - 1] || ''),
@@ -539,16 +602,105 @@ function syncPendingChanges() {
       newBillable: r[BILLABLE_COL - 1] === true,
     });
   });
+  return { sheet: sheet, changes: changes };
+}
 
-  if (changes.length === 0) {
+/**
+ * Execute the actual API calls for a list of changes.
+ * @returns {{successCount: number, failCount: number}}
+ */
+function executeSyncChanges_(changes, sheet) {
+  var cfg = readConfig();
+  var successCount = 0, failCount = 0;
+
+  changes.forEach(function(c) {
+    if (!c.entryId) {
+      failCount++;
+      logChange_('Failure', c.entryId, c.taskId, c.taskName, 'all', '', '(skipped)', 'Missing Entry ID');
+      return;
+    }
+
+    var parts = c.pending.split(',').map(function(s){ return s.trim(); });
+    var rowOK = true;
+
+    var put = {};
+    if (parts.indexOf('Billable') !== -1) put.billable = c.newBillable;
+    if (parts.indexOf('Desc') !== -1) put.description = c.newDesc;
+    if (Object.keys(put).length > 0) {
+      var putErr = null;
+      try {
+        cuPut('/team/' + cfg.teamId + '/time_entries/' + c.entryId, cfg.token, put);
+      } catch (err) {
+        rowOK = false;
+        putErr = err.message;
+      }
+      if (put.billable !== undefined) {
+        logChange_(putErr ? 'Failure' : 'Success', c.entryId, c.taskId, c.taskName, 'Billable',
+          c.snap ? (c.snap.billable ? 'Yes' : 'No') : '', put.billable ? 'Yes' : 'No', putErr || '');
+      }
+      if (put.description !== undefined) {
+        logChange_(putErr ? 'Failure' : 'Success', c.entryId, c.taskId, c.taskName, 'Description',
+          c.snap ? (c.snap.description || '') : '', put.description, putErr || '');
+      }
+    }
+
+    if (parts.indexOf('Tags') !== -1) {
+      var oldTags = parseTagList_(c.snap ? c.snap.tags : '');
+      var newTags = parseTagList_(c.newTags);
+      var oldSet = {}; oldTags.forEach(function(t){ oldSet[t] = true; });
+      var newSet = {}; newTags.forEach(function(t){ newSet[t] = true; });
+      var toAdd = newTags.filter(function(t){ return !oldSet[t]; });
+      var toRemove = oldTags.filter(function(t){ return !newSet[t]; });
+
+      toRemove.forEach(function(tag) {
+        var tErr = null;
+        try {
+          cuDelete('/team/' + cfg.teamId + '/time_entries/tags', cfg.token, {
+            time_entry_ids: [c.entryId], tags: [{ name: tag }],
+          });
+        } catch (err) { rowOK = false; tErr = err.message; }
+        logChange_(tErr ? 'Failure' : 'Success', c.entryId, c.taskId, c.taskName, 'Labels (remove)', tag, '', tErr || '');
+      });
+      toAdd.forEach(function(tag) {
+        var tErr = null;
+        try {
+          cuPost('/team/' + cfg.teamId + '/time_entries/tags', cfg.token, {
+            time_entry_ids: [c.entryId], tags: [{ name: tag }],
+          });
+        } catch (err) { rowOK = false; tErr = err.message; }
+        logChange_(tErr ? 'Failure' : 'Success', c.entryId, c.taskId, c.taskName, 'Labels (add)', '', tag, tErr || '');
+      });
+    }
+
+    if (rowOK) {
+      successCount++;
+      var newSnap = JSON.stringify({ description: c.newDesc, tags: c.newTags, billable: c.newBillable });
+      sheet.getRange(c.rowInSheet, SNAPSHOT_COL).setValue(newSnap);
+      sheet.getRange(c.rowInSheet, PENDING_COL).setValue('');
+      sheet.getRange(c.rowInSheet, CONFIRM_COL).setValue(false);
+      flashRow_(sheet, c.rowInSheet);
+    } else {
+      failCount++;
+    }
+  });
+
+  updateLastSynced_();
+  return { successCount: successCount, failCount: failCount };
+}
+
+/**
+ * Sync with confirmation dialog. Only syncs rows that are Pending + Confirmed.
+ */
+function syncPendingChanges() {
+  var result = collectChanges_(true);
+  if (result.changes.length === 0) {
     SpreadsheetApp.getActive().toast('No confirmed pending changes.', 'ClickUp');
     return;
   }
 
-  // Build dialog text (first 10 + summary)
   var ui = SpreadsheetApp.getUi();
   var lines = [];
-  changes.slice(0, 10).forEach(function(c) {
+  result.changes.slice(0, 10).forEach(function(c) {
     var parts = c.pending.split(',').map(function(s){ return s.trim(); });
     var summary = parts.map(function(p) {
       if (p === 'Desc') {
@@ -567,10 +719,10 @@ function syncPendingChanges() {
     }).join('; ');
     lines.push('Row ' + c.rowInSheet + ' (' + c.entryId + '): ' + summary);
   });
-  if (changes.length > 10) lines.push('... and ' + (changes.length - 10) + ' more.');
+  if (result.changes.length > 10) lines.push('... and ' + (result.changes.length - 10) + ' more.');
 
   var resp = ui.alert(
-    'Sync ' + changes.length + ' change(s) to ClickUp?',
+    'Sync ' + result.changes.length + ' change(s) to ClickUp?',
     lines.join('\n\n'),
     ui.ButtonSet.OK_CANCEL
   );
@@ -579,116 +731,24 @@ function syncPendingChanges() {
     return;
   }
 
-  var cfg = readConfig();
-  var tz = SpreadsheetApp.getActive().getSpreadsheetTimeZone();
-  var successCount = 0, failCount = 0;
-
-  changes.forEach(function(c) {
-    if (!c.entryId) {
-      failCount++;
-      logChange_('Failure', c.entryId, c.taskId, c.taskName, 'all', '', '(skipped)', 'Missing Entry ID');
-      return;
-    }
-
-    var parts = c.pending.split(',').map(function(s){ return s.trim(); });
-    var rowOK = true;
-
-    // Billable + Description go in one PUT if either changed
-    var put = {};
-    if (parts.indexOf('Billable') !== -1) put.billable = c.newBillable;
-    if (parts.indexOf('Desc') !== -1) put.description = c.newDesc;
-    if (Object.keys(put).length > 0) {
-      var putErr = null;
-      try {
-        cuPut('/team/' + cfg.teamId + '/time_entries/' + c.entryId, cfg.token, put);
-      } catch (err) {
-        rowOK = false;
-        putErr = err.message;
-      }
-      // Log every field in this PUT, with the same Success/Failure status
-      if (put.billable !== undefined) {
-        logChange_(
-          putErr ? 'Failure' : 'Success',
-          c.entryId, c.taskId, c.taskName, 'Billable',
-          c.snap ? (c.snap.billable ? 'Yes' : 'No') : '',
-          put.billable ? 'Yes' : 'No',
-          putErr || ''
-        );
-      }
-      if (put.description !== undefined) {
-        logChange_(
-          putErr ? 'Failure' : 'Success',
-          c.entryId, c.taskId, c.taskName, 'Description',
-          c.snap ? (c.snap.description || '') : '',
-          put.description,
-          putErr || ''
-        );
-      }
-    }
-
-    // Tags = diff against snapshot, individual POST/DELETE
-    if (parts.indexOf('Tags') !== -1) {
-      var oldTags = parseTagList_(c.snap ? c.snap.tags : '');
-      var newTags = parseTagList_(c.newTags);
-      var oldSet = {}; oldTags.forEach(function(t){ oldSet[t] = true; });
-      var newSet = {}; newTags.forEach(function(t){ newSet[t] = true; });
-      var toAdd = newTags.filter(function(t){ return !oldSet[t]; });
-      var toRemove = oldTags.filter(function(t){ return !newSet[t]; });
-
-      toRemove.forEach(function(tag) {
-        var tErr = null;
-        try {
-          cuDelete('/team/' + cfg.teamId + '/time_entries/tags', cfg.token, {
-            time_entry_ids: [c.entryId], tags: [{ name: tag }],
-          });
-        } catch (err) {
-          rowOK = false;
-          tErr = err.message;
-        }
-        logChange_(
-          tErr ? 'Failure' : 'Success',
-          c.entryId, c.taskId, c.taskName, 'Labels (remove)',
-          tag, '', tErr || ''
-        );
-      });
-      toAdd.forEach(function(tag) {
-        var tErr = null;
-        try {
-          cuPost('/team/' + cfg.teamId + '/time_entries/tags', cfg.token, {
-            time_entry_ids: [c.entryId], tags: [{ name: tag }],
-          });
-        } catch (err) {
-          rowOK = false;
-          tErr = err.message;
-        }
-        logChange_(
-          tErr ? 'Failure' : 'Success',
-          c.entryId, c.taskId, c.taskName, 'Labels (add)',
-          '', tag, tErr || ''
-        );
-      });
-    }
-
-    if (rowOK) {
-      successCount++;
-      var newSnap = JSON.stringify({
-        description: c.newDesc,
-        tags: c.newTags,
-        billable: c.newBillable,
-      });
-      sheet.getRange(c.rowInSheet, SNAPSHOT_COL).setValue(newSnap);
-      sheet.getRange(c.rowInSheet, PENDING_COL).setValue('');
-      sheet.getRange(c.rowInSheet, CONFIRM_COL).setValue(false);
-      flashRow_(sheet, c.rowInSheet);
-    } else {
-      failCount++;
-    }
-  });
-
-  updateLastSynced_();
-  var msg = 'Sync complete: ' + successCount + ' succeeded, ' + failCount + ' failed.';
-  if (failCount > 0) msg += ' See "' + CHANGE_LOG_SHEET + '" tab.';
+  var outcome = executeSyncChanges_(result.changes, result.sheet);
+  var msg = 'Sync complete: ' + outcome.successCount + ' succeeded, ' + outcome.failCount + ' failed.';
+  if (outcome.failCount > 0) msg += ' See "' + CHANGE_LOG_SHEET + '" tab.';
   SpreadsheetApp.getActive().toast(msg, 'ClickUp', 8);
+}
+
+/**
+ * Sync all pending rows (ignoring Confirm checkbox), skip dialog, then refresh.
+ */
+function syncAndReload() {
+  var result = collectChanges_(false); // all pending, regardless of Confirm
+  if (result.changes.length > 0) {
+    SpreadsheetApp.getActive().toast('Syncing ' + result.changes.length + ' change(s)...', 'ClickUp');
+    var outcome = executeSyncChanges_(result.changes, result.sheet);
+    var msg = outcome.successCount + ' synced, ' + outcome.failCount + ' failed. Refreshing...';
+    SpreadsheetApp.getActive().toast(msg, 'ClickUp', 3);
+  }
+  refreshTimeEntries(true); // skip pending check since we just synced
 }
 
 function discardPendingChanges() {

@@ -46,13 +46,13 @@ In order:
 2. Fill in `Config`:
    - **API Token** — your `pk_...` token.
    - **Team ID** — the workspace ID.
-   - **List ID** — leave blank for now if you don't know it.
+   - **List ID** — leave blank for now (populated via dropdown after step 3).
    - **Preset** — pick from the dropdown.
    - **Custom start/end dates** — only used when Preset = Custom.
    - **Billable filter** — All / Billable only / Non-billable only.
-3. **ClickUp → List all Lists with time entries** (only if you don't know
-   your List ID) — populates the `Lists Found` sheet so you can locate
-   "your List" and copy its ID into the Config.
+3. **ClickUp → List all Lists with time entries** — populates the
+   `Lists Found` sheet and updates the `List ID` dropdown on Config.
+   Pick your List from the dropdown (shows name with Space/Folder path).
 4. **ClickUp → Refresh tag list** — populates the `Tags` sheet (protected
    against manual edits) and enables the multi-select dropdown on the
    Labels column for future refreshes.
@@ -92,6 +92,10 @@ To revert pending edits without syncing:
 - **ClickUp → Discard pending changes** — confirms, then reverts all
   pending rows to their snapshot values.
 
+For a faster workflow when you trust your edits:
+- **ClickUp → Sync & Reload** — pushes all pending rows (ignoring
+  Confirm checkboxes), skips the dialog, then refreshes. One click.
+
 If you refresh while changes are pending, a three-way dialog asks whether
 to sync first, discard and refresh, or cancel.
 
@@ -113,6 +117,7 @@ to sync first, discard and refresh, or cancel.
 | Refresh tag list                     | Re-fetches workspace tags into the `Tags` sheet      |
 | List all Lists with time entries     | Populates `Lists Found` for List ID discovery        |
 | Sync pending changes                 | Confirms and pushes ticked Pending rows to ClickUp   |
+| Sync & Reload                        | Syncs all pending rows silently, then refreshes data |
 | Discard pending changes              | Reverts ticked / Pending rows to snapshot values     |
 | Setup config sheet                   | Creates / refreshes `Config` non-destructively       |
 | Setup two-way sync                   | Installs the `onEdit` trigger (one-time)             |

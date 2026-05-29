@@ -5,6 +5,35 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] — 2026-05-29
+
+### Added
+- **List ID dropdown on Config sheet.** The `List ID` cell (B4) is now a
+  dropdown populated from the `Lists Found` sheet. Display labels show the
+  full path: `"Support LCI (Client Engagements > LCI Paper)"`.
+- New `Display Label` column (column 8) in the `Lists Found` sheet, used as
+  the dropdown source.
+- `resolveListId_()` helper resolves dropdown labels back to numeric List
+  IDs via `Lists Found` lookup. Raw numeric IDs still work for backward
+  compatibility.
+- `buildListLabel_()` and `applyListIdDropdown_()` helper functions.
+- **"Sync & Reload" menu item.** Syncs all pending rows (ignoring Confirm
+  checkbox), skips the confirmation dialog, then automatically refreshes
+  time entries. One-click push-and-pull.
+- `collectChanges_(requireConfirm)` and `executeSyncChanges_(changes, sheet)`
+  extracted from `syncPendingChanges` so both the dialog and silent paths
+  share the same logic.
+
+### Changed
+- `listAllListsWithEntries` now also refreshes the Config B4 dropdown after
+  writing to the `Lists Found` sheet.
+- `readConfig` reads 9 rows (was 8) to cover the full Config spec.
+- `refreshTimeEntries` accepts an optional `skipPendingCheck` parameter so
+  `syncAndReload` can bypass the pending-changes dialog.
+- Config notes for List ID updated to say "Run 'List all Lists' first, then
+  pick from dropdown."
+- Dropdown on B4 rejects manual input (`setAllowInvalid(false)`).
+
 ## [1.7.0] — 2026-05-26
 
 ### Changed

@@ -425,6 +425,13 @@ function refreshTimeEntries(skipPendingCheck) {
   var sheet = ss.getSheetByName(DATA_SHEET);
   if (!sheet) sheet = ss.insertSheet(DATA_SHEET);
   sheet.clear();
+  // Wipe ALL data validations and borders across the entire sheet so leftover
+  // checkboxes/dropdowns/borders from previous refreshes don't haunt empty rows.
+  var fullRange = sheet.getRange(1, 1, sheet.getMaxRows(), sheet.getMaxColumns());
+  fullRange.clearDataValidations();
+  fullRange.setBorder(false, false, false, false, false, false);
+  // Apply Anek Tamil 11pt to the entire sheet (header, data, summary)
+  fullRange.setFontFamily('Anek Tamil').setFontSize(11);
 
   // Header row: black background, white text, bold
   sheet.getRange(1, 1, 1, COLUMNS.length).setValues([COLUMNS])
@@ -437,6 +444,8 @@ function refreshTimeEntries(skipPendingCheck) {
     sheet.getRange(2, 1, rows.length, COLUMNS.length).setValues(rows);
     sheet.getRange(2, BILLABLE_COL, rows.length, 1).insertCheckboxes();
     sheet.getRange(2, CONFIRM_COL, rows.length, 1).insertCheckboxes();
+    // Force 2-decimal display on Billed Hours column
+    sheet.getRange(2, 5, rows.length, 1).setNumberFormat('0.00');
     applyCategoryDropdown_(sheet, 2, rows.length);
   }
 
@@ -448,26 +457,39 @@ function refreshTimeEntries(skipPendingCheck) {
     sheet.getRange(1, col, Math.max(sheet.getMaxRows(), 1), 1).setWrap(true);
   });
 
-  // Summary block
+  // Summary block — 3 blank rows of separation after last data row
   var dataRows = entries.length;
-  var summaryStartRow = dataRows + 3; // 1 header + dataRows + 1 blank row + 1
+  var summaryStartRow = dataRows + 1 + 3 + 1; // header(1) + data + 3 blank rows + 1
   var hoursCol = 5; // "Billed Hours" column E
+  var labelCol = 4; // column D
 
-  sheet.getRange(summaryStartRow, 4).setValue('Total Support Hours for the Month').setFontWeight('bold');
+  // Row 1: Total Support Hours (normal weight, hours format 0.00)
+  sheet.getRange(summaryStartRow, labelCol).setValue('Total Support Hours for the Month');
   if (dataRows > 0) {
-    sheet.getRange(summaryStartRow, hoursCol).setFormula('=SUM(E2:E' + (dataRows + 1) + ')').setFontWeight('bold');
+    sheet.getRange(summaryStartRow, hoursCol)
+      .setFormula('=SUM(E2:E' + (dataRows + 1) + ')')
+      .setNumberFormat('0.00');
   } else {
-    sheet.getRange(summaryStartRow, hoursCol).setValue(0).setFontWeight('bold');
+    sheet.getRange(summaryStartRow, hoursCol).setValue(0).setNumberFormat('0.00');
   }
 
-  sheet.getRange(summaryStartRow + 1, 4).setValue('Rate').setFontWeight('bold');
-  sheet.getRange(summaryStartRow + 1, hoursCol).setValue(cfg.rate).setNumberFormat('0.00').setFontWeight('bold');
+  // Row 2: Rate (normal weight, currency format $0.00)
+  sheet.getRange(summaryStartRow + 1, labelCol).setValue('Rate');
+  sheet.getRange(summaryStartRow + 1, hoursCol).setValue(cfg.rate).setNumberFormat('$0.00');
 
-  sheet.getRange(summaryStartRow + 2, 4).setValue('Total Due').setFontWeight('bold');
+  // Row 3: Total Due (bold, black bg, white text, currency format $0.00)
+  sheet.getRange(summaryStartRow + 2, labelCol).setValue('Total Due');
   sheet.getRange(summaryStartRow + 2, hoursCol)
     .setFormula('=' + 'E' + summaryStartRow + '*E' + (summaryStartRow + 1))
-    .setNumberFormat('0.00')
-    .setFontWeight('bold');
+    .setNumberFormat('$0.00');
+  sheet.getRange(summaryStartRow + 2, labelCol, 1, 2)
+    .setFontWeight('bold')
+    .setBackground(HEADER_BG)
+    .setFontColor(HEADER_FG);
+
+  // Outer border only (no internal lines)
+  sheet.getRange(summaryStartRow, labelCol, 3, 2)
+    .setBorder(true, true, true, true, false, false, '#000000', SpreadsheetApp.BorderStyle.SOLID);
 
   var filterNote = cfg.billableFilter !== 'All' ? ' [' + cfg.billableFilter + ': ' + entries.length + '/' + totalFetched + ']' : '';
   SpreadsheetApp.getActive().toast(entries.length + ' entries loaded (' + range.label + ')' + filterNote + '.', 'ClickUp', 5);

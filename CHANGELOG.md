@@ -5,6 +5,40 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] — 2026-06-03
+
+### Added
+- Entire Report sheet (header, data, summary block) now uses **Anek Tamil
+  11pt** as the font.
+
+### Changed
+- **Summary block restyled:**
+  - Outer border only (removed internal grid lines).
+  - Row 1 (Total Support Hours) and Row 2 (Rate) no longer bold —
+    only Total Due row is bold.
+  - Rate and Total Due now display as currency (`$0.00`); Total Hours
+    stays as plain `0.00` (it's hours, not money).
+  - Total Due row keeps its black background + white text treatment.
+
+## [2.1.0] — 2026-06-03
+
+### Added
+- Summary block now has a thin black border around the 3x2 cell area,
+  matching the client report style.
+- Total Due row in the summary block is styled black background + white
+  bold text (mirrors the header row treatment).
+- Billed Hours column on each data row is forced to 2-decimal display
+  format (`0.00`).
+
+### Changed
+- Separation between last data row and the summary block increased from
+  1 blank row to 3 blank rows for visual breathing room.
+
+### Fixed
+- Stale data validations (checkboxes, dropdowns) and borders from previous
+  refreshes are now wiped from the entire sheet before re-population, so
+  empty rows no longer show leftover checkboxes or category dropdowns.
+
 ## [2.0.0] — 2026-06-03
 
 ### Added

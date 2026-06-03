@@ -5,6 +5,50 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] — 2026-06-03
+
+### Added
+- **Tag mapping system.** The Tags sheet now has a "Display Name" column.
+  Only tags with a display name appear in the dropdown and in the report.
+  Unmapped tags are hidden from the cell entirely. Mappings are preserved
+  across "Refresh tag list" runs.
+- **Report summary block.** After the last data row: Total Support Hours
+  (SUM formula), Rate (from Config), Total Due (Hours × Rate). Rebuilt on
+  every refresh.
+- **Rate setting** added to the Config sheet (row 11).
+- **Black header with white text** on all script-managed sheets (Report,
+  Lists Found, Tags, Change Log).
+
+### Changed
+- **BREAKING:** Output sheet renamed from `Time Entries` to `Report`.
+  Existing `Time Entries` sheets are not migrated — delete or rename them.
+- **BREAKING:** Column renames to match client report format:
+  Task ID → Issue Key, Task Name → Issue summary,
+  Description → Work Description, Time (hours) → Billed Hours,
+  User → Full name, Labels (Tags) → Task Category.
+- Tags sheet protection changed: column A (tag names) is protected;
+  column B (display names) is editable.
+- `LABELS_COL` renamed to `CATEGORY_COL` throughout.
+- Tag sync now reverse-maps display names → ClickUp tag names before
+  making API calls.
+- Pending status shows "Category" instead of "Tags" for tag changes.
+- `readConfig` reads 10 rows (was 9) to include Rate.
+- `entryToRow` accepts a tag forward-map and uses it for display.
+- `applyCategoryDropdown_` replaces `applyLabelsDropdown` — sources display
+  names from the mapped Tags sheet.
+
+### Removed
+- Title Case tag display (already removed in 1.5.0; confirmed gone).
+- Full sheet protection on Tags sheet (replaced with column-A-only).
+
+## [1.8.1] — 2026-05-29
+
+### Added
+- `Lists Found` and `Change Log` sheets are now protected against manual
+  edits, same as the `Tags` sheet.
+- Shared `protectSheet_()` helper replaces inline protection boilerplate
+  across all three protected sheets.
+
 ## [1.8.0] — 2026-05-29
 
 ### Added

@@ -1,23 +1,23 @@
 /**
- * ClickUp Time Entries → Google Sheet (with confirm-before-sync)
+ * ClickUp Time Entries → Google Sheet (Report with confirm-before-sync)
  *
  * Workflow:
- *   1. Refresh time entries → loads data, snapshots original values.
- *   2. Edit any of: Description, Labels, Billable → row gets a "Pending" status.
+ *   1. Refresh time entries → loads data into the Report sheet.
+ *   2. Edit any of: Work Description, Task Category, Billable → row marked Pending.
  *   3. Tick the Confirm checkbox on rows you want to send.
  *   4. Run "Sync pending changes" → confirmation dialog → API calls.
  *
  * Setup once:
- *   - "Setup config sheet"
- *   - Fill in token / Team ID / List ID
- *   - "Refresh tag list"
- *   - "Setup two-way sync" (installable onEdit trigger)
+ *   - "Setup config sheet"  →  fill in token / Team ID / Rate
+ *   - "List all Lists"       →  pick a List from the Config dropdown
+ *   - "Refresh tag list"     →  fill in Display Name mappings on Tags sheet
+ *   - "Setup two-way sync"   →  installable onEdit trigger
  */
 
 // ---------- Constants ----------
 
 const CONFIG_SHEET = 'Config';
-const DATA_SHEET = 'Time Entries';
+const DATA_SHEET = 'Report';
 const LISTS_SHEET = 'Lists Found';
 const TAGS_SHEET = 'Tags';
 const CHANGE_LOG_SHEET = 'Change Log';
@@ -28,36 +28,39 @@ const PRESETS = ['Current month', 'Previous month', 'Current quarter', 'Previous
 const BILLABLE_FILTERS = ['All', 'Billable only', 'Non-billable only'];
 
 const COLUMNS = [
-  'Date',            // 1
-  'Task ID',         // 2
-  'Task Name',       // 3
-  'Description',     // 4   editable, syncable
-  'Time (hours)',    // 5
-  'User',            // 6
-  'Labels (Tags)',   // 7   editable, syncable
-  'Billable',        // 8   editable, syncable
-  'Pending',         // 9   read-only status text
-  'Confirm',         // 10  checkbox
-  'Entry ID',        // 11  hidden
-  'Snapshot',        // 12  hidden, JSON of original {description, tags, billable}
+  'Date',              // 1
+  'Issue Key',         // 2
+  'Issue summary',     // 3
+  'Work Description',  // 4   editable, syncable
+  'Billed Hours',      // 5
+  'Full name',         // 6
+  'Task Category',     // 7   editable, syncable
+  'Billable',          // 8   editable, syncable
+  'Pending',           // 9   read-only status text
+  'Confirm',           // 10  checkbox
+  'Entry ID',          // 11  hidden
+  'Snapshot',          // 12  hidden, JSON of original values
 ];
 
 const COLUMN_WIDTHS = [100, 110, 280, 400, 90, 200, 220, 80, 130, 80, 120, 120];
-const WRAP_COLUMNS = [3, 4]; // Task Name, Description
+const WRAP_COLUMNS = [3, 4]; // Issue summary, Work Description
 
 const DESCRIPTION_COL = 4;
-const LABELS_COL = 7;
+const CATEGORY_COL = 7;
 const BILLABLE_COL = 8;
 const PENDING_COL = 9;
 const CONFIRM_COL = 10;
 const ENTRY_ID_COL = 11;
 const SNAPSHOT_COL = 12;
 
-// Editable columns that contribute to pending state
-const EDITABLE_COLS = [DESCRIPTION_COL, LABELS_COL, BILLABLE_COL];
+const EDITABLE_COLS = [DESCRIPTION_COL, CATEGORY_COL, BILLABLE_COL];
 
-// Config row for "Last synced"
 const LAST_SYNCED_ROW = 10;
+const RATE_ROW = 11;
+
+// Header style
+const HEADER_BG = '#000000';
+const HEADER_FG = '#ffffff';
 
 // ---------- Menu ----------
 
@@ -96,6 +99,7 @@ function setupConfigSheet() {
     ['Include subtasks', 'Yes', 'Yes / No'],
     ['Billable filter', 'All', 'All / Billable only / Non-billable only'],
     ['Last synced', '', 'Auto-updated after a successful sync'],
+    ['Rate', '125', 'Hourly rate used in the Report summary block'],
   ];
 
   const existing = {};
@@ -141,7 +145,7 @@ function setupConfigSheet() {
 function readConfig() {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG_SHEET);
   if (!sheet) throw new Error('No Config sheet. Run "Setup config sheet" first.');
-  const values = sheet.getRange(2, 1, 9, 2).getValues();
+  const values = sheet.getRange(2, 1, 10, 2).getValues();
   const map = {};
   values.forEach(([k, v]) => { map[k] = v; });
 
@@ -157,6 +161,7 @@ function readConfig() {
     customEnd: map['Custom end date'],
     includeSubtasks: String(map['Include subtasks'] || 'Yes').trim().toLowerCase() === 'yes',
     billableFilter: String(map['Billable filter'] || 'All').trim(),
+    rate: parseFloat(map['Rate']) || 0,
   };
 
   if (!cfg.token) throw new Error('Missing API Token in Config.');
@@ -166,28 +171,21 @@ function readConfig() {
   return cfg;
 }
 
-/**
- * Resolves the List ID value from Config B4.
- * If it looks like a display label from the dropdown, looks up the ID in Lists Found.
- * Returns the numeric List ID string, or empty string if blank.
- */
 function resolveListId_(raw) {
   if (!raw) return '';
-  // If it's purely numeric, treat as a raw List ID (backward compat)
   if (/^\d+$/.test(raw)) return raw;
-  // Otherwise it's a display label — look it up in Lists Found
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var listsSheet = ss.getSheetByName(LISTS_SHEET);
   if (!listsSheet || listsSheet.getLastRow() < 2) {
     throw new Error('Lists Found sheet is empty. Run "List all Lists with time entries" first.');
   }
   var lastRow = listsSheet.getLastRow();
-  var data = listsSheet.getRange(2, 1, lastRow - 1, 8).getValues(); // cols: name, id, folder, space, ..., ..., ..., label
+  var data = listsSheet.getRange(2, 1, lastRow - 1, 8).getValues();
   for (var i = 0; i < data.length; i++) {
-    var label = String(data[i][7] || ''); // column 8 = Display Label
-    if (label === raw) return String(data[i][1]); // column 2 = List ID
+    var label = String(data[i][7] || '');
+    if (label === raw) return String(data[i][1]);
   }
-  throw new Error('Could not find a matching List for "' + raw + '" in the Lists Found sheet. Try running "List all Lists with time entries" again.');
+  throw new Error('Could not find a matching List for "' + raw + '". Try running "List all Lists with time entries" again.');
 }
 
 // ---------- Date range ----------
@@ -298,19 +296,72 @@ function getTimeEntries(token, teamId, listId, startMs, endMs, assigneeIds) {
   return all;
 }
 
+// ---------- Tag mapping ----------
+
+/**
+ * Read the Tags sheet and build forward/reverse maps.
+ * Forward: clickupTagName → displayName (only for tags with a display name set).
+ * Reverse: displayName → clickupTagName.
+ */
+function getTagMaps_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(TAGS_SHEET);
+  var forward = {}; // clickup name → display name
+  var reverse = {}; // display name → clickup name
+  if (!sheet || sheet.getLastRow() < 2) return { forward: forward, reverse: reverse };
+  var data = sheet.getRange(2, 1, sheet.getLastRow() - 1, 2).getValues();
+  data.forEach(function(r) {
+    var clickupName = String(r[0] || '').trim();
+    var displayName = String(r[1] || '').trim();
+    if (clickupName && displayName) {
+      forward[clickupName] = displayName;
+      reverse[displayName] = clickupName;
+    }
+  });
+  return { forward: forward, reverse: reverse };
+}
+
+/**
+ * Convert ClickUp tag names to display names using forward map.
+ * Unmapped tags are hidden (excluded).
+ */
+function mapTagsForDisplay_(clickupTags, forwardMap) {
+  if (!Array.isArray(clickupTags)) return '';
+  var mapped = [];
+  clickupTags.forEach(function(t) {
+    var name = t.name || t;
+    var display = forwardMap[name];
+    if (display) mapped.push(display);
+  });
+  return mapped.join(', ');
+}
+
+/**
+ * Convert display tag string back to ClickUp tag names using reverse map.
+ */
+function reverseMapTags_(displayString, reverseMap) {
+  var displayNames = parseTagList_(displayString);
+  return displayNames.map(function(d) {
+    return reverseMap[d] || d; // fallback to display name if no reverse mapping
+  });
+}
+
 // ---------- Transform ----------
 
-function entryToRow(e, tz) {
+function entryToRow(e, tz, tagForwardMap) {
   var startDate = new Date(Number(e.start));
   var durHours = Number(e.duration || 0) / 3600000;
   var task = e.task || {};
-  var tags = Array.isArray(e.tags) ? e.tags.map(function(t){ return t.name; }).join(', ') : '';
   var user = e.user && (e.user.username || e.user.email) || '';
   var displayId = task.custom_id || task.id || '';
   var billable = e.billable === true;
+
+  // Map tags: only include mapped tags
+  var displayTags = mapTagsForDisplay_(e.tags || [], tagForwardMap);
+
   var snapshot = JSON.stringify({
     description: e.description || '',
-    tags: tags,
+    tags: displayTags,
     billable: billable,
   });
   return [
@@ -320,10 +371,10 @@ function entryToRow(e, tz) {
     e.description || '',
     Math.round(durHours * 100) / 100,
     user,
-    tags,
+    displayTags,
     billable,
-    '',           // Pending — empty
-    false,        // Confirm — unchecked
+    '',     // Pending
+    false,  // Confirm
     e.id || '',
     snapshot,
   ];
@@ -332,7 +383,6 @@ function entryToRow(e, tz) {
 // ---------- Refresh ----------
 
 function refreshTimeEntries(skipPendingCheck) {
-  // Check for pending changes first (unless called from syncAndReload)
   if (!skipPendingCheck) {
     var pendingCount = countPendingRows_();
     if (pendingCount > 0) {
@@ -368,18 +418,26 @@ function refreshTimeEntries(skipPendingCheck) {
 
   entries.sort(function(a, b) { return Number(a.start) - Number(b.start); });
 
+  // Get tag mapping for display
+  var tagMaps = getTagMaps_();
+
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName(DATA_SHEET);
   if (!sheet) sheet = ss.insertSheet(DATA_SHEET);
   sheet.clear();
-  sheet.getRange(1, 1, 1, COLUMNS.length).setValues([COLUMNS]).setFontWeight('bold');
+
+  // Header row: black background, white text, bold
+  sheet.getRange(1, 1, 1, COLUMNS.length).setValues([COLUMNS])
+    .setFontWeight('bold')
+    .setBackground(HEADER_BG)
+    .setFontColor(HEADER_FG);
 
   if (entries.length > 0) {
-    var rows = entries.map(function(e){ return entryToRow(e, tz); });
+    var rows = entries.map(function(e){ return entryToRow(e, tz, tagMaps.forward); });
     sheet.getRange(2, 1, rows.length, COLUMNS.length).setValues(rows);
     sheet.getRange(2, BILLABLE_COL, rows.length, 1).insertCheckboxes();
     sheet.getRange(2, CONFIRM_COL, rows.length, 1).insertCheckboxes();
-    applyLabelsDropdown(sheet, 2, rows.length);
+    applyCategoryDropdown_(sheet, 2, rows.length);
   }
 
   sheet.setFrozenRows(1);
@@ -389,6 +447,27 @@ function refreshTimeEntries(skipPendingCheck) {
   WRAP_COLUMNS.forEach(function(col) {
     sheet.getRange(1, col, Math.max(sheet.getMaxRows(), 1), 1).setWrap(true);
   });
+
+  // Summary block
+  var dataRows = entries.length;
+  var summaryStartRow = dataRows + 3; // 1 header + dataRows + 1 blank row + 1
+  var hoursCol = 5; // "Billed Hours" column E
+
+  sheet.getRange(summaryStartRow, 4).setValue('Total Support Hours for the Month').setFontWeight('bold');
+  if (dataRows > 0) {
+    sheet.getRange(summaryStartRow, hoursCol).setFormula('=SUM(E2:E' + (dataRows + 1) + ')').setFontWeight('bold');
+  } else {
+    sheet.getRange(summaryStartRow, hoursCol).setValue(0).setFontWeight('bold');
+  }
+
+  sheet.getRange(summaryStartRow + 1, 4).setValue('Rate').setFontWeight('bold');
+  sheet.getRange(summaryStartRow + 1, hoursCol).setValue(cfg.rate).setNumberFormat('0.00').setFontWeight('bold');
+
+  sheet.getRange(summaryStartRow + 2, 4).setValue('Total Due').setFontWeight('bold');
+  sheet.getRange(summaryStartRow + 2, hoursCol)
+    .setFormula('=' + 'E' + summaryStartRow + '*E' + (summaryStartRow + 1))
+    .setNumberFormat('0.00')
+    .setFontWeight('bold');
 
   var filterNote = cfg.billableFilter !== 'All' ? ' [' + cfg.billableFilter + ': ' + entries.length + '/' + totalFetched + ']' : '';
   SpreadsheetApp.getActive().toast(entries.length + ' entries loaded (' + range.label + ')' + filterNote + '.', 'ClickUp', 5);
@@ -425,7 +504,8 @@ function listAllListsWithEntries() {
   if (!sheet) sheet = ss.insertSheet(LISTS_SHEET);
   sheet.clear();
   var header = ['List name', 'List ID', 'Folder', 'Space', '# entries', 'Total hours', 'Range', 'Display Label'];
-  sheet.getRange(1, 1, 1, header.length).setValues([header]).setFontWeight('bold');
+  sheet.getRange(1, 1, 1, header.length).setValues([header]).setFontWeight('bold')
+    .setBackground(HEADER_BG).setFontColor(HEADER_FG);
   if (rows.length > 0) {
     var data = rows.map(function(r){
       return [r.name, r.id, r.folder, r.space, r.count, Math.round(r.hours * 100) / 100, range.label, buildListLabel_(r)];
@@ -434,16 +514,12 @@ function listAllListsWithEntries() {
   }
   sheet.setFrozenRows(1);
   sheet.autoResizeColumns(1, header.length);
-
-  // Populate Config B4 dropdown with display labels
+  protectSheet_(sheet, 'Lists Found — managed by script');
   applyListIdDropdown_(rows);
 
-  SpreadsheetApp.getActive().toast('Found ' + rows.length + ' Lists. See "' + LISTS_SHEET + '" tab. Config "List ID" dropdown updated.', 'ClickUp', 6);
+  SpreadsheetApp.getActive().toast('Found ' + rows.length + ' Lists. See "' + LISTS_SHEET + '" tab. Config dropdown updated.', 'ClickUp', 6);
 }
 
-/**
- * Build a human-readable label for a list entry: "Name (Space > Folder)".
- */
 function buildListLabel_(r) {
   var path = [];
   if (r.space) path.push(r.space);
@@ -452,9 +528,6 @@ function buildListLabel_(r) {
   return r.name;
 }
 
-/**
- * Apply the List ID dropdown on Config B4 using display labels from Lists Found rows.
- */
 function applyListIdDropdown_(rows) {
   if (!rows || rows.length === 0) return;
   var labels = rows.map(function(r){ return buildListLabel_(r); });
@@ -463,9 +536,21 @@ function applyListIdDropdown_(rows) {
   if (!configSheet) return;
   var rule = SpreadsheetApp.newDataValidation()
     .requireValueInList(labels, true)
-    .setAllowInvalid(false) // dropdown only — reject manual input
+    .setAllowInvalid(false)
     .build();
   configSheet.getRange('B4').setDataValidation(rule);
+}
+
+// ---------- Sheet protection ----------
+
+function protectSheet_(sheet, description) {
+  sheet.getProtections(SpreadsheetApp.ProtectionType.SHEET).forEach(function(p){ p.remove(); });
+  var protection = sheet.protect().setDescription(description);
+  protection.setWarningOnly(false);
+  var me = Session.getEffectiveUser();
+  protection.addEditor(me);
+  protection.removeEditors(protection.getEditors().filter(function(u){ return u.getEmail() !== me.getEmail(); }));
+  if (protection.canDomainEdit()) protection.setDomainEdit(false);
 }
 
 // ---------- Tag list ----------
@@ -474,8 +559,8 @@ function refreshTagList() {
   var cfg = readConfig();
   SpreadsheetApp.getActive().toast('Fetching workspace tags...', 'ClickUp');
 
-  var tags = getAllWorkspaceTags(cfg.token, cfg.teamId);
-  var names = tags.map(function(t){ return t.name; })
+  var clickupTags = getAllWorkspaceTags(cfg.token, cfg.teamId);
+  var newNames = clickupTags.map(function(t){ return t.name; })
     .filter(function(n){ return n && n.length > 0; })
     .sort(function(a, b){ return a.toLowerCase().localeCompare(b.toLowerCase()); });
 
@@ -483,39 +568,75 @@ function refreshTagList() {
   var sheet = ss.getSheetByName(TAGS_SHEET);
   if (!sheet) sheet = ss.insertSheet(TAGS_SHEET);
 
+  // Read existing mappings before clearing
+  var existingMappings = {};
   sheet.getProtections(SpreadsheetApp.ProtectionType.SHEET).forEach(function(p){ p.remove(); });
+  sheet.getProtections(SpreadsheetApp.ProtectionType.RANGE).forEach(function(p){ p.remove(); });
+  if (sheet.getLastRow() >= 2) {
+    var old = sheet.getRange(2, 1, sheet.getLastRow() - 1, 2).getValues();
+    old.forEach(function(r) {
+      var tagName = String(r[0] || '').trim();
+      var displayName = String(r[1] || '').trim();
+      if (tagName && displayName) existingMappings[tagName] = displayName;
+    });
+  }
+
   sheet.clear();
-  sheet.getRange(1, 1).setValue('Tag name').setFontWeight('bold');
-  if (names.length > 0) sheet.getRange(2, 1, names.length, 1).setValues(names.map(function(n){ return [n]; }));
+  sheet.getRange(1, 1, 1, 2).setValues([['Tag name', 'Display Name']]).setFontWeight('bold')
+    .setBackground(HEADER_BG).setFontColor(HEADER_FG);
+
+  if (newNames.length > 0) {
+    var rows = newNames.map(function(n){
+      return [n, existingMappings[n] || ''];
+    });
+    sheet.getRange(2, 1, rows.length, 2).setValues(rows);
+  }
   sheet.setFrozenRows(1);
   sheet.setColumnWidth(1, 240);
+  sheet.setColumnWidth(2, 240);
 
-  var protection = sheet.protect().setDescription('Tags list — managed by script');
+  // Protect column A only (tag names), leave column B editable
+  var colARange = sheet.getRange(1, 1, Math.max(sheet.getMaxRows(), 1), 1);
+  var protection = colARange.protect().setDescription('Tag names — managed by script');
   protection.setWarningOnly(false);
   var me = Session.getEffectiveUser();
   protection.addEditor(me);
   protection.removeEditors(protection.getEditors().filter(function(u){ return u.getEmail() !== me.getEmail(); }));
   if (protection.canDomainEdit()) protection.setDomainEdit(false);
 
-  SpreadsheetApp.getActive().toast('Loaded ' + names.length + ' tag(s). Re-run "Refresh time entries" to apply dropdowns.', 'ClickUp', 6);
+  var mapped = Object.keys(existingMappings).length;
+  SpreadsheetApp.getActive().toast(
+    'Loaded ' + newNames.length + ' tag(s), preserved ' + mapped + ' mapping(s). Fill in Display Name for tags you want in the dropdown.',
+    'ClickUp', 8
+  );
 }
 
-function applyLabelsDropdown(dataSheet, firstRow, numRows) {
+/**
+ * Apply multi-select dropdown to the Task Category column using only mapped tags.
+ */
+function applyCategoryDropdown_(dataSheet, firstRow, numRows) {
+  var tagMaps = getTagMaps_();
+  var displayNames = [];
+  // Get display names in order from the Tags sheet
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var tagSheet = ss.getSheetByName(TAGS_SHEET);
-  if (!tagSheet) return;
-  var lastRow = tagSheet.getLastRow();
-  if (lastRow < 2) return;
-  var values = tagSheet.getRange(2, 1, lastRow - 1, 1).getValues().map(function(r){ return r[0]; }).filter(Boolean);
-  if (values.length === 0) return;
+  if (!tagSheet || tagSheet.getLastRow() < 2) return;
+  var data = tagSheet.getRange(2, 1, tagSheet.getLastRow() - 1, 2).getValues();
+  data.forEach(function(r) {
+    var display = String(r[1] || '').trim();
+    if (display) displayNames.push(display);
+  });
+  if (displayNames.length === 0) return;
+  // Sort alphabetically
+  displayNames.sort(function(a, b){ return a.toLowerCase().localeCompare(b.toLowerCase()); });
   var rule = SpreadsheetApp.newDataValidation()
-    .requireValueInList(values, true)
+    .requireValueInList(displayNames, true)
     .setAllowInvalid(true)
     .build();
-  dataSheet.getRange(firstRow, LABELS_COL, numRows, 1).setDataValidation(rule);
+  dataSheet.getRange(firstRow, CATEGORY_COL, numRows, 1).setDataValidation(rule);
 }
 
-// ---------- Edit handler: marks rows as pending ----------
+// ---------- Edit handler ----------
 
 function onClickUpEdit(e) {
   if (!e || !e.range) return;
@@ -526,8 +647,6 @@ function onClickUpEdit(e) {
   if (row < 2) return;
   if (e.range.getNumRows() > 1 || e.range.getNumColumns() > 1) return;
   if (EDITABLE_COLS.indexOf(col) === -1) return;
-
-  // Recompute pending state from snapshot vs current values
   recomputePendingForRow_(sheet, row);
 }
 
@@ -546,12 +665,12 @@ function recomputePendingForRow_(sheet, row) {
   }
 
   var currentDesc = String(rowValues[DESCRIPTION_COL - 1] || '');
-  var currentTags = String(rowValues[LABELS_COL - 1] || '');
+  var currentTags = String(rowValues[CATEGORY_COL - 1] || '');
   var currentBillable = rowValues[BILLABLE_COL - 1] === true;
 
   var diffs = [];
   if (currentDesc !== String(snap.description || '')) diffs.push('Desc');
-  if (normalizeTagString_(currentTags) !== normalizeTagString_(snap.tags || '')) diffs.push('Tags');
+  if (normalizeTagString_(currentTags) !== normalizeTagString_(snap.tags || '')) diffs.push('Category');
   if (currentBillable !== (snap.billable === true)) diffs.push('Billable');
 
   sheet.getRange(row, PENDING_COL).setValue(diffs.join(', '));
@@ -571,11 +690,6 @@ function countPendingRows_() {
 
 // ---------- Sync ----------
 
-/**
- * Collect pending changes from the Time Entries sheet.
- * @param {boolean} requireConfirm — if true, only rows with Confirm=true; if false, all pending rows.
- * @returns {{sheet: Sheet, changes: Object[]}}
- */
 function collectChanges_(requireConfirm) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName(DATA_SHEET);
@@ -598,19 +712,16 @@ function collectChanges_(requireConfirm) {
       pending: pending,
       snap: snap,
       newDesc: String(r[DESCRIPTION_COL - 1] || ''),
-      newTags: String(r[LABELS_COL - 1] || ''),
+      newTags: String(r[CATEGORY_COL - 1] || ''),
       newBillable: r[BILLABLE_COL - 1] === true,
     });
   });
   return { sheet: sheet, changes: changes };
 }
 
-/**
- * Execute the actual API calls for a list of changes.
- * @returns {{successCount: number, failCount: number}}
- */
 function executeSyncChanges_(changes, sheet) {
   var cfg = readConfig();
+  var tagMaps = getTagMaps_();
   var successCount = 0, failCount = 0;
 
   changes.forEach(function(c) {
@@ -630,10 +741,7 @@ function executeSyncChanges_(changes, sheet) {
       var putErr = null;
       try {
         cuPut('/team/' + cfg.teamId + '/time_entries/' + c.entryId, cfg.token, put);
-      } catch (err) {
-        rowOK = false;
-        putErr = err.message;
-      }
+      } catch (err) { rowOK = false; putErr = err.message; }
       if (put.billable !== undefined) {
         logChange_(putErr ? 'Failure' : 'Success', c.entryId, c.taskId, c.taskName, 'Billable',
           c.snap ? (c.snap.billable ? 'Yes' : 'No') : '', put.billable ? 'Yes' : 'No', putErr || '');
@@ -644,13 +752,17 @@ function executeSyncChanges_(changes, sheet) {
       }
     }
 
-    if (parts.indexOf('Tags') !== -1) {
-      var oldTags = parseTagList_(c.snap ? c.snap.tags : '');
-      var newTags = parseTagList_(c.newTags);
-      var oldSet = {}; oldTags.forEach(function(t){ oldSet[t] = true; });
-      var newSet = {}; newTags.forEach(function(t){ newSet[t] = true; });
-      var toAdd = newTags.filter(function(t){ return !oldSet[t]; });
-      var toRemove = oldTags.filter(function(t){ return !newSet[t]; });
+    if (parts.indexOf('Category') !== -1) {
+      // Reverse-map display names → ClickUp tag names for API calls
+      var oldDisplayTags = parseTagList_(c.snap ? c.snap.tags : '');
+      var newDisplayTags = parseTagList_(c.newTags);
+      var oldClickup = oldDisplayTags.map(function(d){ return tagMaps.reverse[d] || d; });
+      var newClickup = newDisplayTags.map(function(d){ return tagMaps.reverse[d] || d; });
+
+      var oldSet = {}; oldClickup.forEach(function(t){ oldSet[t] = true; });
+      var newSet = {}; newClickup.forEach(function(t){ newSet[t] = true; });
+      var toAdd = newClickup.filter(function(t){ return !oldSet[t]; });
+      var toRemove = oldClickup.filter(function(t){ return !newSet[t]; });
 
       toRemove.forEach(function(tag) {
         var tErr = null;
@@ -659,7 +771,7 @@ function executeSyncChanges_(changes, sheet) {
             time_entry_ids: [c.entryId], tags: [{ name: tag }],
           });
         } catch (err) { rowOK = false; tErr = err.message; }
-        logChange_(tErr ? 'Failure' : 'Success', c.entryId, c.taskId, c.taskName, 'Labels (remove)', tag, '', tErr || '');
+        logChange_(tErr ? 'Failure' : 'Success', c.entryId, c.taskId, c.taskName, 'Category (remove)', tag, '', tErr || '');
       });
       toAdd.forEach(function(tag) {
         var tErr = null;
@@ -668,7 +780,7 @@ function executeSyncChanges_(changes, sheet) {
             time_entry_ids: [c.entryId], tags: [{ name: tag }],
           });
         } catch (err) { rowOK = false; tErr = err.message; }
-        logChange_(tErr ? 'Failure' : 'Success', c.entryId, c.taskId, c.taskName, 'Labels (add)', '', tag, tErr || '');
+        logChange_(tErr ? 'Failure' : 'Success', c.entryId, c.taskId, c.taskName, 'Category (add)', '', tag, tErr || '');
       });
     }
 
@@ -688,9 +800,6 @@ function executeSyncChanges_(changes, sheet) {
   return { successCount: successCount, failCount: failCount };
 }
 
-/**
- * Sync with confirmation dialog. Only syncs rows that are Pending + Confirmed.
- */
 function syncPendingChanges() {
   var result = collectChanges_(true);
   if (result.changes.length === 0) {
@@ -707,9 +816,9 @@ function syncPendingChanges() {
         var oldD = c.snap ? truncate_(c.snap.description, 40) : '(unknown)';
         return 'Desc: "' + oldD + '" \u2192 "' + truncate_(c.newDesc, 40) + '"';
       }
-      if (p === 'Tags') {
+      if (p === 'Category') {
         var oldT = c.snap ? (c.snap.tags || '(none)') : '(unknown)';
-        return 'Tags: [' + oldT + '] \u2192 [' + (c.newTags || '(none)') + ']';
+        return 'Category: [' + oldT + '] \u2192 [' + (c.newTags || '(none)') + ']';
       }
       if (p === 'Billable') {
         var oldB = c.snap ? (c.snap.billable ? 'Yes' : 'No') : '(unknown)';
@@ -737,18 +846,15 @@ function syncPendingChanges() {
   SpreadsheetApp.getActive().toast(msg, 'ClickUp', 8);
 }
 
-/**
- * Sync all pending rows (ignoring Confirm checkbox), skip dialog, then refresh.
- */
 function syncAndReload() {
-  var result = collectChanges_(false); // all pending, regardless of Confirm
+  var result = collectChanges_(false);
   if (result.changes.length > 0) {
     SpreadsheetApp.getActive().toast('Syncing ' + result.changes.length + ' change(s)...', 'ClickUp');
     var outcome = executeSyncChanges_(result.changes, result.sheet);
     var msg = outcome.successCount + ' synced, ' + outcome.failCount + ' failed. Refreshing...';
     SpreadsheetApp.getActive().toast(msg, 'ClickUp', 3);
   }
-  refreshTimeEntries(true); // skip pending check since we just synced
+  refreshTimeEntries(true);
 }
 
 function discardPendingChanges() {
@@ -781,7 +887,7 @@ function discardPendingChanges() {
     if (!snap) return;
     var rowNum = idx + 2;
     sheet.getRange(rowNum, DESCRIPTION_COL).setValue(snap.description || '');
-    sheet.getRange(rowNum, LABELS_COL).setValue(snap.tags || '');
+    sheet.getRange(rowNum, CATEGORY_COL).setValue(snap.tags || '');
     sheet.getRange(rowNum, BILLABLE_COL).setValue(snap.billable === true);
     sheet.getRange(rowNum, PENDING_COL).setValue('');
     sheet.getRange(rowNum, CONFIRM_COL).setValue(false);
@@ -789,6 +895,8 @@ function discardPendingChanges() {
   });
   SpreadsheetApp.getActive().toast('Discarded ' + reverted + ' pending change(s).', 'ClickUp', 5);
 }
+
+// ---------- Utilities ----------
 
 function parseTagList_(raw) {
   if (raw == null || raw === '') return [];
@@ -829,25 +937,18 @@ function logChange_(status, entryId, taskId, taskName, field, oldVal, newVal, me
       sheet.getRange(1, 1, 1, 9).setValues([[
         'Timestamp', 'Status', 'Entry ID', 'Task ID', 'Task Name',
         'Field', 'Old value', 'New value', 'Error',
-      ]]).setFontWeight('bold');
+      ]]).setFontWeight('bold').setBackground(HEADER_BG).setFontColor(HEADER_FG);
       sheet.setFrozenRows(1);
-      // Sensible widths
       var widths = [150, 80, 110, 110, 260, 110, 280, 280, 280];
       for (var c = 0; c < widths.length; c++) sheet.setColumnWidth(c + 1, widths[c]);
+      protectSheet_(sheet, 'Change Log — managed by script');
     }
     var tz = SpreadsheetApp.getActive().getSpreadsheetTimeZone();
     sheet.appendRow([
       Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd HH:mm:ss'),
-      status,
-      entryId || '',
-      taskId || '',
-      taskName || '',
-      field || '',
-      String(oldVal == null ? '' : oldVal),
-      String(newVal == null ? '' : newVal),
-      message || '',
+      status, entryId || '', taskId || '', taskName || '',
+      field || '', String(oldVal == null ? '' : oldVal), String(newVal == null ? '' : newVal), message || '',
     ]);
-    // Cap retention: keep header + most recent CHANGE_LOG_MAX_ROWS rows
     var totalRows = sheet.getLastRow();
     var dataRows = totalRows - 1;
     if (dataRows > CHANGE_LOG_MAX_ROWS) {

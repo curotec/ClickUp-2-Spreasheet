@@ -7,15 +7,18 @@ so nothing leaves the sheet by accident.
 
 ## Features
 
-- **One-click refresh** of time entries for a chosen List and date range.
+- **One-click refresh** of time entries into a client-ready Report sheet.
 - **Date presets**: current/previous month, current/previous quarter, custom.
 - **Billable filter**: all / billable only / non-billable only.
 - **Custom Task IDs** (e.g. `CTK-10334`) when the ClickApp is enabled,
   with fallback to internal task IDs.
-- **Multi-select tag dropdown** sourced from your workspace's tag list.
-- **Confirm-before-sync** for description, tags, and billable changes —
-  edits are flagged but never sent to ClickUp until you tick a row and
-  click "Sync pending changes".
+- **Tag mapping**: define display names for ClickUp tags in the Tags sheet.
+  Only mapped tags appear in the report; unmapped tags are hidden.
+  Dropdown uses display names; sync reverse-maps to ClickUp tag names.
+- **Confirm-before-sync** for Work Description, Task Category, and Billable
+  changes — edits are flagged but never sent to ClickUp until you confirm.
+- **Report summary block**: Total Hours (formula), Rate (configurable),
+  Total Due — rebuilt on every refresh.
 - **Full change log** of every sync attempt (success and failure).
 - **List discovery helper** to find the correct List ID by name.
 
@@ -50,12 +53,15 @@ In order:
    - **Preset** — pick from the dropdown.
    - **Custom start/end dates** — only used when Preset = Custom.
    - **Billable filter** — All / Billable only / Non-billable only.
+   - **Rate** — hourly rate for the summary block (default 125).
 3. **ClickUp → List all Lists with time entries** — populates the
    `Lists Found` sheet and updates the `List ID` dropdown on Config.
    Pick your List from the dropdown (shows name with Space/Folder path).
-4. **ClickUp → Refresh tag list** — populates the `Tags` sheet (protected
-   against manual edits) and enables the multi-select dropdown on the
-   Labels column for future refreshes.
+4. **ClickUp → Refresh tag list** — populates the `Tags` sheet with all
+   workspace time-entry tags. Then fill in the **Display Name** column
+   (column B) for each tag you want to appear in the Task Category
+   dropdown. Tags without a display name are hidden from the report.
+   Column A is protected; column B is editable.
 5. **ClickUp → Setup two-way sync** — installs the `onEdit` trigger.
    Google will ask for additional permissions (the script needs to act on
    your behalf so it can run on edits); accept.
@@ -72,8 +78,8 @@ Just refresh whenever you want fresh data:
 
 ### Editing values back to ClickUp
 
-The Time Entries sheet has three editable columns: **Description**,
-**Labels (Tags)**, and **Billable**. Editing them does **not** write to
+The Report sheet has three editable columns: **Work Description**,
+**Task Category**, and **Billable**. Editing them does **not** write to
 ClickUp on the spot — instead:
 
 1. Edit any of those cells. The **Pending** column shows what's changed
@@ -103,11 +109,11 @@ to sync first, discard and refresh, or cancel.
 
 | Sheet         | Purpose                                                      |
 |---------------|--------------------------------------------------------------|
-| `Config`      | Settings (token, IDs, preset, filters). Editable.            |
-| `Time Entries`| Main data. Refreshed on demand.                              |
-| `Tags`        | Workspace tag list. Protected — managed by the script.       |
-| `Lists Found` | Helper output of "List all Lists with time entries".         |
-| `Change Log`  | Every sync attempt (success and failure). Capped at 5000 rows. |
+| `Config`      | Settings (token, IDs, preset, filters, rate). Editable.      |
+| `Report`      | Main data output. Includes summary block. Editable (sync columns). |
+| `Tags`        | Tag mapping. Column A protected; column B (Display Name) editable. |
+| `Lists Found` | List discovery output. Protected — managed by the script.    |
+| `Change Log`  | Every sync attempt (success and failure). Protected. Capped at 5000 rows. |
 
 ## Menu reference
 
@@ -136,9 +142,14 @@ to sync first, discard and refresh, or cancel.
   see their change until you refresh.
 - **Race conditions.** Two users editing the same row both ticking Confirm
   and running Sync results in last-write-wins on ClickUp's side.
-- **Tags are diffed against the local snapshot.** If a tag is removed from
-  ClickUp between refresh and sync, the DELETE will succeed silently;
-  if it's renamed, the tag is treated as removed and added.
+- **Tags are diffed in display-name space, then reverse-mapped.** If a
+  display name doesn't have a reverse mapping (e.g., someone edited the
+  Tags sheet and removed a row), the display name is sent as-is to
+  ClickUp, which may auto-create a new tag.
+- **Unmapped tags are invisible.** If a time entry has a tag that isn't
+  mapped in the Tags sheet, it won't appear in the Report cell. It still
+  exists in ClickUp — refreshing the tag list and adding a mapping will
+  make it visible.
 - **Custom IDs.** `task.custom_id` can be `null` for tasks created before
   the Custom Task IDs ClickApp was enabled. Those rows show the internal
   task ID instead.

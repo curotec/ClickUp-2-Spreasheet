@@ -18,7 +18,9 @@ so nothing leaves the sheet by accident.
 - **Confirm-before-sync** for Work Description, Task Category, and Billable
   changes — edits are flagged but never sent to ClickUp until you confirm.
 - **Report summary block**: Total Hours (formula), Rate (configurable),
-  Total Due — rebuilt on every refresh.
+  Total Due — rebuilt on every refresh. Set **Target Contract Hours** in
+  Config to switch to an overage layout (Target / Overage hrs / Overage
+  at rate) instead of a flat Total Due.
 - **Full change log** of every sync attempt (success and failure).
 - **List discovery helper** to find the correct List ID by name.
 
@@ -54,6 +56,10 @@ In order:
    - **Custom start/end dates** — only used when Preset = Custom.
    - **Billable filter** — All / Billable only / Non-billable only.
    - **Rate** — hourly rate for the summary block (default 125).
+   - **Target Contract Hours** — optional. Leave blank for the standard
+     Total Due block. Enter a number (e.g. `20`) to switch the summary to
+     an overage layout: Total Hours, Target Contract Hours, Overage (hrs)
+     `=MAX(0, Total − Target)`, and Overage at rate `=Overage × Rate`.
 3. **ClickUp → List all Lists with time entries** — populates the
    `Lists Found` sheet and updates the `List ID` dropdown on Config.
    Pick your List from the dropdown (shows name with Space/Folder path).
@@ -109,7 +115,7 @@ to sync first, discard and refresh, or cancel.
 
 | Sheet         | Purpose                                                      |
 |---------------|--------------------------------------------------------------|
-| `Config`      | Settings (token, IDs, preset, filters, rate). Editable.      |
+| `Config`      | Settings (token, IDs, preset, filters, rate, target hours). Editable. |
 | `Report`      | Main data output. Includes summary block. Editable (sync columns). |
 | `Tags`        | Tag mapping. Column A protected; column B (Display Name) editable. |
 | `Lists Found` | List discovery output. Protected — managed by the script.    |
@@ -164,7 +170,6 @@ without touching the rest of the code:
 ```javascript
 const COLUMNS = [...];          // Column headers in display order
 const COLUMN_WIDTHS = [...];    // Pixel widths matching COLUMNS
-const WRAP_COLUMNS = [3, 4];    // Columns that wrap long text
 const CHANGE_LOG_MAX_ROWS = 5000;
 ```
 

@@ -5,6 +5,54 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.3] — 2026-07-01
+
+### Changed
+- **Rate** value cell (standard summary mode) now has a Dark Gray 1
+  (`#b7b7b7`) background; number format unchanged (`$0.00`).
+
+## [2.3.2] — 2026-07-01
+
+### Changed
+- **Column widths** adjusted: `[100, 100, 280, 400, 110, 200, 200, 80,
+  130, 80, 120, 120]`.
+- **Text wrap** now applied to the entire Report sheet (all cells), rather
+  than only the Issue summary and Work Description columns.
+
+### Removed
+- `WRAP_COLUMNS` constant (obsolete now that wrap is applied sheet-wide).
+
+## [2.3.1] — 2026-07-01
+
+### Added
+- `Version:` line in the `Code.gs` header comment.
+
+### Changed
+- **Overage (hrs)** value cell now uses bold white text on the Dark Gray 2
+  (`#999999`) background (was default black, non-bold).
+
+## [2.3.0] — 2026-07-01
+
+### Added
+- **Target Contract Hours** config field (Config row 12, optional). When
+  set, the Report summary block switches to an **overage billing** layout;
+  when blank, the standard Total Due block is used (fully backward
+  compatible).
+- Overage summary block (shown only when Target Contract Hours is set):
+  1. **Total Support Hours for the Month** — `=SUM(...)`, `0.00`.
+  2. **Target Contract Hours - {N} hrs** — target value; `{N}` is the
+     whole-number target embedded in the label. Value cell `0.00`.
+  3. **Overage (hrs)** — live formula `=MAX(0, Total − Target)` so hours
+     under target show `0`; value cell shaded **Dark Gray 2 (`#999999`)`.
+  4. **Overage (${rate}/hr)** — live formula `Overage hrs × Rate`,
+     `$0.00`, styled bold black/white like the old Total Due row.
+
+### Changed
+- `readConfig` now reads 11 setting rows (was 10) to include Target
+  Contract Hours, and exposes `cfg.targetHours` (`null` when blank).
+- Summary-block builder branches on `cfg.targetHours`; outer border now
+  spans the correct number of rows for whichever layout renders.
+
 ## [2.2.0] — 2026-06-03
 
 ### Added

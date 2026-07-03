@@ -1,6 +1,8 @@
 /**
  * ClickUp Time Entries → Google Sheet (Report with confirm-before-sync)
  *
+ * Version: 2.3.3
+ *
  * Workflow:
  *   1. Refresh time entries → loads data into the Report sheet.
  *   2. Edit any of: Work Description, Task Category, Billable → row marked Pending.
@@ -42,8 +44,7 @@ const COLUMNS = [
   'Snapshot',          // 12  hidden, JSON of original values
 ];
 
-const COLUMN_WIDTHS = [100, 110, 280, 400, 90, 200, 220, 80, 130, 80, 120, 120];
-const WRAP_COLUMNS = [3, 4]; // Issue summary, Work Description
+const COLUMN_WIDTHS = [100, 100, 280, 400, 110, 200, 200, 80, 130, 80, 120, 120];
 
 const DESCRIPTION_COL = 4;
 const CATEGORY_COL = 7;
@@ -100,6 +101,7 @@ function setupConfigSheet() {
     ['Billable filter', 'All', 'All / Billable only / Non-billable only'],
     ['Last synced', '', 'Auto-updated after a successful sync'],
     ['Rate', '125', 'Hourly rate used in the Report summary block'],
+    ['Target Contract Hours', '', 'Optional. If set, summary shows an overage block (billed hours over this target * Rate). Blank = standard Total Due block.'],
   ];
 
   const existing = {};
@@ -145,7 +147,7 @@ function setupConfigSheet() {
 function readConfig() {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG_SHEET);
   if (!sheet) throw new Error('No Config sheet. Run "Setup config sheet" first.');
-  const values = sheet.getRange(2, 1, 10, 2).getValues();
+  const values = sheet.getRange(2, 1, 11, 2).getValues();
   const map = {};
   values.forEach(([k, v]) => { map[k] = v; });
 
@@ -162,6 +164,12 @@ function readConfig() {
     includeSubtasks: String(map['Include subtasks'] || 'Yes').trim().toLowerCase() === 'yes',
     billableFilter: String(map['Billable filter'] || 'All').trim(),
     rate: parseFloat(map['Rate']) || 0,
+    targetHours: (function() {
+      var raw = String(map['Target Contract Hours'] == null ? '' : map['Target Contract Hours']).trim();
+      if (raw === '') return null;
+      var n = parseFloat(raw);
+      return (isNaN(n) || n < 0) ? null : n;
+    })(),
   };
 
   if (!cfg.token) throw new Error('Missing API Token in Config.');
@@ -430,8 +438,8 @@ function refreshTimeEntries(skipPendingCheck) {
   var fullRange = sheet.getRange(1, 1, sheet.getMaxRows(), sheet.getMaxColumns());
   fullRange.clearDataValidations();
   fullRange.setBorder(false, false, false, false, false, false);
-  // Apply Anek Tamil 11pt to the entire sheet (header, data, summary)
-  fullRange.setFontFamily('Anek Tamil').setFontSize(11);
+  // Apply Anek Tamil 11pt and text wrap to the entire sheet (header, data, summary)
+  fullRange.setFontFamily('Anek Tamil').setFontSize(11).setWrap(true);
 
   // Header row: black background, white text, bold
   sheet.getRange(1, 1, 1, COLUMNS.length).setValues([COLUMNS])
@@ -453,17 +461,15 @@ function refreshTimeEntries(skipPendingCheck) {
   for (var c = 0; c < COLUMN_WIDTHS.length; c++) sheet.setColumnWidth(c + 1, COLUMN_WIDTHS[c]);
   sheet.hideColumns(ENTRY_ID_COL);
   sheet.hideColumns(SNAPSHOT_COL);
-  WRAP_COLUMNS.forEach(function(col) {
-    sheet.getRange(1, col, Math.max(sheet.getMaxRows(), 1), 1).setWrap(true);
-  });
 
   // Summary block — 3 blank rows of separation after last data row
   var dataRows = entries.length;
   var summaryStartRow = dataRows + 1 + 3 + 1; // header(1) + data + 3 blank rows + 1
   var hoursCol = 5; // "Billed Hours" column E
   var labelCol = 4; // column D
+  var GREY_BG = '#999999'; // Google Sheets "Dark Gray 2"
 
-  // Row 1: Total Support Hours (normal weight, hours format 0.00)
+  // Row 1 (both modes): Total Support Hours (normal weight, hours format 0.00)
   sheet.getRange(summaryStartRow, labelCol).setValue('Total Support Hours for the Month');
   if (dataRows > 0) {
     sheet.getRange(summaryStartRow, hoursCol)
@@ -473,22 +479,64 @@ function refreshTimeEntries(skipPendingCheck) {
     sheet.getRange(summaryStartRow, hoursCol).setValue(0).setNumberFormat('0.00');
   }
 
-  // Row 2: Rate (normal weight, currency format $0.00)
-  sheet.getRange(summaryStartRow + 1, labelCol).setValue('Rate');
-  sheet.getRange(summaryStartRow + 1, hoursCol).setValue(cfg.rate).setNumberFormat('$0.00');
+  var blockRows;
 
-  // Row 3: Total Due (bold, black bg, white text, currency format $0.00)
-  sheet.getRange(summaryStartRow + 2, labelCol).setValue('Total Due');
-  sheet.getRange(summaryStartRow + 2, hoursCol)
-    .setFormula('=' + 'E' + summaryStartRow + '*E' + (summaryStartRow + 1))
-    .setNumberFormat('$0.00');
-  sheet.getRange(summaryStartRow + 2, labelCol, 1, 2)
-    .setFontWeight('bold')
-    .setBackground(HEADER_BG)
-    .setFontColor(HEADER_FG);
+  if (cfg.targetHours == null) {
+    // ----- Standard mode: Rate + Total Due -----
+    blockRows = 3;
+
+    // Row 2: Rate (normal weight, currency $0.00, Dark Gray 1 background)
+    sheet.getRange(summaryStartRow + 1, labelCol).setValue('Rate');
+    sheet.getRange(summaryStartRow + 1, hoursCol)
+      .setValue(cfg.rate)
+      .setNumberFormat('$0.00')
+      .setBackground('#b7b7b7');
+
+    // Row 3: Total Due (bold, black bg, white text, currency format $0.00)
+    sheet.getRange(summaryStartRow + 2, labelCol).setValue('Total Due');
+    sheet.getRange(summaryStartRow + 2, hoursCol)
+      .setFormula('=' + 'E' + summaryStartRow + '*E' + (summaryStartRow + 1))
+      .setNumberFormat('$0.00');
+    sheet.getRange(summaryStartRow + 2, labelCol, 1, 2)
+      .setFontWeight('bold')
+      .setBackground(HEADER_BG)
+      .setFontColor(HEADER_FG);
+
+  } else {
+    // ----- Overage mode: Target / Overage (hrs) / Overage ($rate/hr) -----
+    blockRows = 4;
+    var totalRow = summaryStartRow;
+    var targetRow = summaryStartRow + 1;
+    var overageHrsRow = summaryStartRow + 2;
+    var overageDueRow = summaryStartRow + 3;
+    var targetLabelNum = Math.round(cfg.targetHours); // whole number in label
+
+    // Row 2: Target Contract Hours - {N} hrs
+    sheet.getRange(targetRow, labelCol).setValue('Target Contract Hours - ' + targetLabelNum + ' hrs');
+    sheet.getRange(targetRow, hoursCol).setValue(cfg.targetHours).setNumberFormat('0.00');
+
+    // Row 3: Overage (hrs) = MAX(0, total - target), Dark Gray 2 value cell
+    sheet.getRange(overageHrsRow, labelCol).setValue('Overage (hrs)');
+    sheet.getRange(overageHrsRow, hoursCol)
+      .setFormula('=MAX(0,E' + totalRow + '-E' + targetRow + ')')
+      .setNumberFormat('0.00')
+      .setBackground(GREY_BG)
+      .setFontColor(HEADER_FG)
+      .setFontWeight('bold');
+
+    // Row 4: Overage (${rate}/hr) = overage hrs * rate, bold black/white
+    sheet.getRange(overageDueRow, labelCol).setValue('Overage ($' + cfg.rate + '/hr)');
+    sheet.getRange(overageDueRow, hoursCol)
+      .setFormula('=E' + overageHrsRow + '*' + cfg.rate)
+      .setNumberFormat('$0.00');
+    sheet.getRange(overageDueRow, labelCol, 1, 2)
+      .setFontWeight('bold')
+      .setBackground(HEADER_BG)
+      .setFontColor(HEADER_FG);
+  }
 
   // Outer border only (no internal lines)
-  sheet.getRange(summaryStartRow, labelCol, 3, 2)
+  sheet.getRange(summaryStartRow, labelCol, blockRows, 2)
     .setBorder(true, true, true, true, false, false, '#000000', SpreadsheetApp.BorderStyle.SOLID);
 
   var filterNote = cfg.billableFilter !== 'All' ? ' [' + cfg.billableFilter + ': ' + entries.length + '/' + totalFetched + ']' : '';

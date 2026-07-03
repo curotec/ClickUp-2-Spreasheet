@@ -11,6 +11,7 @@ A Google Apps Script that pulls time entries from ClickUp into a Google Sheet, e
 | **Dashboard** | KPI cards + hours by person + by category + top 10 issues. Auto-rebuilt on every refresh. |
 | **Report** | One row per time entry. Includes Rate, Cost, and all billing columns. |
 | **Tags** | Workspace tag list with editable Display Name (col B) and Rate ($/hr) (col C) columns. Tags without a Display Name are hidden from the Report. |
+| **Roles** | Person list (col A, script-managed) with editable Roles (col B) and Rate ($/hr) (col C). Used when Rate Mode = `Per Role`. Roles and rates preserved across refreshes. |
 | **Config** | API credentials and run settings. |
 | **Lists Found** | Output of the list discovery scan. Used to populate the List ID dropdown. |
 | **Change Log** | Audit trail of every sync operation (success and failure). Capped at 5,000 rows. |
@@ -39,6 +40,7 @@ Open the spreadsheet, then go to **ClickUp → Setup config sheet**. Fill in the
 | Custom end date | Used only when Preset = `Custom`. Inclusive. Format: `YYYY-MM-DD`. |
 | Include subtasks | `Yes` or `No`. |
 | Billable filter | `All`, `Billable only`, or `Non-billable only`. |
+| Rate Mode | `Per Task` (rate from Tags sheet by first tag) or `Per Role` (rate + role from Roles sheet by Full Name). Defaults to `Per Task`. |
 | Client Name | Shown in the Dashboard title (e.g. `Acme Corp`). |
 | Month Label | Shown in the Dashboard header (e.g. `April 2026`). |
 
@@ -65,6 +67,26 @@ Fill in Display Name for every tag you want to appear in the Report, and Rate fo
 > **Tag visibility:** Leaving Display Name blank is the way to exclude noisy or internal tags from the Report. The Task Category dropdown is built from populated Display Names only.
 
 > **Rate lookup:** Cost is calculated from the **first tag** on each time entry. The raw ClickUp tag (not the Display Name) is used for the rate lookup, so renaming via Display Name doesn't break billing.
+
+### Rate Mode: Per Task vs Per Role
+
+Config → **Rate Mode** selects one of two fully separate profiles. Per Task is the original behavior, untouched. Per Role changes the rate source, the Task Category, row visibility, the two-way sync, and the Dashboard.
+
+| | `Per Task` *(default)* | `Per Role` |
+|---|---|---|
+| **Rate source** | Tags sheet, by the entry's first raw ClickUp tag | Roles sheet, by Full Name |
+| **Task Category (col I)** | Mapped tag Display Names (header: `Task Category`) | The person's **Role** from the Roles sheet, blank if no role (header: `Role`) |
+| **Row visibility** | Rows with unmapped tags are hidden | **All rows visible** (tag mapping ignored) |
+| **Two-way sync of Task Category** | Yes — Display Name reverse-maps to a ClickUp tag | **No** — a Role has no ClickUp equivalent, so the column doesn't sync |
+| **Dashboard: first section** | Hours by person — billable vs credit | **Hours by role — billable** (single `Total` column = billable hours) |
+| **Dashboard: Hours by task category** | Shown | **Hidden** |
+| **Dashboard: Top 10 issues** | Issue · Hours · Type | Issue · Hours (**Type column removed**) |
+
+In **Per Role** mode, run **ClickUp → Refresh roles list** (or just sync — the Roles sheet is auto-populated from each sync). Fill in **Roles** (col B) and **Rate ($/hr)** (col C) per person. A person with no rate is treated as `$0`; a person with no role shows a blank Task Category. Both columns are preserved across refreshes.
+
+What's identical across both modes: the Cost formula (`=IF(J{n}, E{n}*F{n}, 0)`), credit-value tracking, Work Description and Billable two-way sync, and the KPI cards. Only the items in the table above differ.
+
+Because Rate (and, in Per Role mode, the Role shown in Task Category) is written into the Report at sync time, changing a rate or role on the Roles sheet requires a re-sync to take effect (same behavior as tag rates).
 
 ### 5. Install the two-way sync trigger
 
@@ -106,13 +128,25 @@ Non-billable rows always display `$0` in the sheet. The rate in column F is stil
 
 ### Report subtotals
 
-Three rows appear below the data:
+With `Billable filter = All` (or `Non-billable only`), three rows appear below the data:
 
 | Row | Hours | Cost |
 |---|---|---|
 | Sub total Support Hours | `SUM` of all hours | `SUM` of all Cost (G) |
 | Total Hours Credit | `SUMIF` where Billable = FALSE | `SUMPRODUCT` of non-billable hours × rate *(grayed out)* |
 | Total Amount Due | `SUMIF` where Billable = TRUE | `SUM` of Cost (G) |
+
+With `Billable filter = Billable only`, every row is billable, so the block collapses to a **single row** — `Sub total Hours / Total Amount Due` (hours in E, amount in G). The credit row is omitted.
+
+### Billable only: what changes
+
+Selecting `Billable filter = Billable only` also simplifies the outputs, since credit is always zero:
+
+- **Report subtotals** collapse to the single row described above.
+- **Dashboard KPI strip** blanks the Credit hours card (the F:G slot renders empty), keeping the four-card band and `% billable` in its original position.
+- **Dashboard "Hours by person"** (Per Task) drops the Credit and separate Total columns → `Person · Total` with a single-series chart. (In Per Role mode the role section is already billable-only.)
+
+These stack with Rate Mode: Billable only + Per Role gives the `Role` header, the collapsed subtotal, the KPI strip with a blank Credit card, and the role-based first section.
 
 ---
 
@@ -138,6 +172,7 @@ Every sync operation is logged in the **Change Log** sheet.
 |---|---|
 | Refresh time entries | Pull from ClickUp, write Report, rebuild Dashboard |
 | Refresh tag list | Sync tags from ClickUp; preserves existing rates |
+| Refresh roles list | Scan who logged time on the selected List; preserves existing per-person Roles and rates |
 | Rebuild Dashboard | Rebuild Dashboard from current Report data (no API call) |
 | List all Lists with time entries | Discover List IDs and populate the Config dropdown |
 | Sync pending changes | Push confirmed edits to ClickUp |

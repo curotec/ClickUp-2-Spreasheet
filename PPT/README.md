@@ -122,9 +122,11 @@ Classification is driven entirely by the **Billable checkbox** (column J) on eac
 
 ### Cost formula
 
-Column G uses: `=IF(J{row}=TRUE, E{row}*F{row}, 0)`
+Column G uses: `=ROUND(IF(J{row}=TRUE, E{row}*F{row}, 0), 2)`
 
 Non-billable rows always display `$0` in the sheet. The rate in column F is still stored so the Dashboard can compute the credit value.
+
+The per-row `ROUND(…, 2)` ensures the stored Cost is the true penny amount, so the subtotal always reconciles with the sum of the displayed line items — including when hours are fractional. (Without it, summing full-precision costs could differ by a cent from adding up the rounded line items by hand.)
 
 ### Report subtotals
 

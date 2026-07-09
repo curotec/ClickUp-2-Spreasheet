@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.4.3] — 2026-07-09
+
+### Fixed
+
+- **Rounding reconciliation for fractional hours.** Each row's Cost formula now rounds to 2 decimals (`=ROUND(IF(J,E*F,0),2)`) instead of storing full precision. Previously, fractional time entries could make the subtotal (`SUM` of full-precision costs) disagree by a cent with the sum of the displayed, penny-rounded line items. Rounding at the row level means every printed line item is the true stored value and the total always reconciles with them.
+- The informational **credit value** (grayed-out, All filter) now rounds per row the same way (`SUMPRODUCT` over `ROUND(E*F,2)`), and the **Dashboard** `totalCost`/`creditCost` accumulate per-row-rounded costs, so Dashboard and Report agree to the penny.
+
+---
+
 ## [1.4.2] — 2026-07-03
 
 ### Changed

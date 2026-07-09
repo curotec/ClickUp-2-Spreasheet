@@ -1,6 +1,6 @@
 /**
  * ClickUp Time Entries → Google Sheet  |  Billing Fork
- * Version: 1.4.2  (2026-07-03)
+ * Version: 1.4.3  (2026-07-09)
  *
  * Fork of the upstream confirm-before-sync importer. Highlights vs upstream:
  *   - Tags sheet has three columns: Tag name (read-only) · Display Name · Rate ($/hr)
@@ -32,7 +32,7 @@
 
 // ---------- Constants ----------
 
-const SCRIPT_VERSION  = '1.4.2';           // keep in sync with header comment + CHANGELOG on every release
+const SCRIPT_VERSION  = '1.4.3';           // keep in sync with header comment + CHANGELOG on every release
 
 const CONFIG_SHEET    = 'Config';
 const DATA_SHEET      = 'Report';          // renamed from "Time Entries"
@@ -781,9 +781,12 @@ function refreshTimeEntries(skipPendingCheck) {
     // Cost formula written AFTER insertCheckboxes so col J (Billable) is fully
     // initialised as boolean checkboxes before the IF references it.
     // Using =IF(J{n}, ...) — checkbox value is directly truthy, avoids filter edge cases.
+    // ROUND(...,2) at the row level so the stored Cost is the true penny amount and
+    // the subtotal (=SUM(G)) always reconciles with the printed line items even when
+    // hours are fractional (rounding is applied per row, not only at the total).
     for (var i = 0; i < rows.length; i++) {
       var rn = i + 2;
-      sheet.getRange(rn, COST_COL).setFormula('=IF(J' + rn + ',E' + rn + '*F' + rn + ',0)');
+      sheet.getRange(rn, COST_COL).setFormula('=ROUND(IF(J' + rn + ',E' + rn + '*F' + rn + ',0),2)');
     }
 
     // Task Category dropdown (tag Display Names) applies only in Per Task mode.
@@ -816,7 +819,7 @@ function refreshTimeEntries(skipPendingCheck) {
       sheet.getRange(subRow,     7).setFormula('=SUM(G2:G' + dataEnd + ')');
       sheet.getRange(subRow + 1, 4).setValue('Total Hours Credit');
       sheet.getRange(subRow + 1, 5).setFormula('=SUMIF(J2:J' + dataEnd + ',FALSE,E2:E' + dataEnd + ')');
-      sheet.getRange(subRow + 1, 7).setFormula('=SUMPRODUCT((J2:J' + dataEnd + '=FALSE)*E2:E' + dataEnd + '*F2:F' + dataEnd + ')');
+      sheet.getRange(subRow + 1, 7).setFormula('=SUMPRODUCT((J2:J' + dataEnd + '=FALSE)*ROUND(E2:E' + dataEnd + '*F2:F' + dataEnd + ',2))');
       sheet.getRange(subRow + 2, 4).setValue('Total Amount Due');
       sheet.getRange(subRow + 2, 5).setFormula('=SUMIF(J2:J' + dataEnd + ',TRUE,E2:E' + dataEnd + ')');
       sheet.getRange(subRow + 2, 7).setFormula('=SUM(G2:G' + dataEnd + ')');
@@ -920,8 +923,11 @@ function rebuildDashboard() {
     var issueName= String(r[2] || '');
 
     totalHours += hours;
-    if (isBill) { billableHours += hours; totalCost  += hours * rate; }
-    else        { creditHours  += hours; creditCost += hours * rate; }
+    // Round each row's cost to 2 dp before accumulating, matching the Report's
+    // per-row ROUND(...,2) so Dashboard totals reconcile with the sheet to the penny.
+    var rowCost = Math.round(hours * rate * 100) / 100;
+    if (isBill) { billableHours += hours; totalCost  += rowCost; }
+    else        { creditHours  += hours; creditCost += rowCost; }
 
     if (person) {
       if (!personMap[person]) personMap[person] = { billable: 0, credit: 0 };

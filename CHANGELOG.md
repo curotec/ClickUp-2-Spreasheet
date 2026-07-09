@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.4] — 2026-07-01
+
+### Fixed
+- **Rounding drift in the summary block.** The Total Support Hours formula
+  is now `=ROUND(SUM(...),2)` instead of a bare `SUM(...)`. With many
+  fractional time entries, floating-point accumulation could make the
+  displayed total (and the Rate/Overage/Total Due figures derived from it)
+  disagree with the visible sum of the Billed Hours column by a cent or a
+  hundredth of an hour. Rounding the total at the source fixes every
+  downstream figure, since they all reference this cell.
+
 ## [2.3.3] — 2026-07-01
 
 ### Changed

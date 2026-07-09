@@ -1,7 +1,7 @@
 /**
  * ClickUp Time Entries → Google Sheet (Report with confirm-before-sync)
  *
- * Version: 2.3.3
+ * Version: 2.3.4
  *
  * Workflow:
  *   1. Refresh time entries → loads data into the Report sheet.
@@ -473,7 +473,7 @@ function refreshTimeEntries(skipPendingCheck) {
   sheet.getRange(summaryStartRow, labelCol).setValue('Total Support Hours for the Month');
   if (dataRows > 0) {
     sheet.getRange(summaryStartRow, hoursCol)
-      .setFormula('=SUM(E2:E' + (dataRows + 1) + ')')
+      .setFormula('=ROUND(SUM(E2:E' + (dataRows + 1) + '),2)')
       .setNumberFormat('0.00');
   } else {
     sheet.getRange(summaryStartRow, hoursCol).setValue(0).setNumberFormat('0.00');

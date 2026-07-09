@@ -1,29 +1,44 @@
 /**
  * ClickUp Time Entries → Google Sheet  |  Billing Fork
+ * Version: 1.4.2  (2026-07-03)
  *
- * Fork of the upstream confirm-before-sync importer. Changes:
- *   - Tags sheet gains a "Rate ($/hr)" column (preserved across refreshes)
- *   - Main sheet renamed to "Report" with billing columns:
+ * Fork of the upstream confirm-before-sync importer. Highlights vs upstream:
+ *   - Tags sheet has three columns: Tag name (read-only) · Display Name · Rate ($/hr)
+ *     Tags without a Display Name are hidden from the Report's Task Category.
+ *     Both Display Name and Rate are preserved across refreshes.
+ *   - Main sheet "Report" with billing columns:
  *       Date, Issue Key, Issue summary, Work Description, Hours,
- *       Rate, Cost, Full name, Task Category
- *   - Rate is looked up from Tags sheet by the entry's first tag
- *   - Cost = Hours × Rate (live formula in sheet)
- *   - Dashboard sheet: KPIs + hours by person + by category + top 10 issues
+ *       Rate, Cost, Full name, Task Category, Billable
+ *   - Rate looked up from Tags sheet by the entry's first raw ClickUp tag
+ *   - Rate Mode (Config): "Per Task" uses Tags-sheet rate by first raw tag and
+ *     shows mapped tag Display Names in Task Category (Tags govern row visibility);
+ *     "Per Role" uses the Roles sheet (Full Name · Roles · Rate) keyed by Full Name —
+ *     rate from the Rate column, Task Category shows the person's Role, all rows are
+ *     visible regardless of tag mapping, and Task Category is excluded from two-way sync.
+ *   - Cost = IF(Billable, Hours × Rate, 0) — live formula
+ *   - Dashboard sheet: KPI cards (warm-card aesthetic), hours-by-person,
+ *     hours-by-category, top-10 issues, with horizontal bar charts beside each table
+ *   - Report sheet typography: Anek Tamil 11pt, black header row
+ *   - Config supports Client Name, Month Label, and Skip IDs (custom task IDs to exclude)
  *
- * Upstream features kept intact:
- *   - Confirm-before-sync two-way editing (Description, Labels, Billable)
+ * Two-way sync (kept from upstream):
+ *   - Confirm-before-sync editing of Work Description, Task Category, Billable
  *   - Snapshot diffing + Pending / Confirm columns
- *   - Change Log sheet
- *   - List discovery + Config dropdown
- *   - Sync & Reload, Discard pending changes
+ *   - Change Log sheet with audit trail (capped at 5,000 rows)
+ *   - Display Name ↔ ClickUp tag name reverse mapping on push
+ *
+ * See CHANGELOG.md for version history.
  */
 
 // ---------- Constants ----------
+
+const SCRIPT_VERSION  = '1.4.2';           // keep in sync with header comment + CHANGELOG on every release
 
 const CONFIG_SHEET    = 'Config';
 const DATA_SHEET      = 'Report';          // renamed from "Time Entries"
 const LISTS_SHEET     = 'Lists Found';
 const TAGS_SHEET      = 'Tags';
+const DEVS_SHEET      = 'Roles';   // Full Name · Roles · Rate ($/hr); used when Rate Mode = Per Role
 const CHANGE_LOG_SHEET = 'Change Log';
 const DASHBOARD_SHEET = 'Dashboard';
 const CHANGE_LOG_MAX_ROWS = 5000;
@@ -31,6 +46,7 @@ const CLICKUP_BASE    = 'https://api.clickup.com/api/v2';
 
 const PRESETS = ['Current month', 'Previous month', 'Current quarter', 'Previous quarter', 'Custom'];
 const BILLABLE_FILTERS = ['All', 'Billable only', 'Non-billable only'];
+const RATE_MODES = ['Per Task', 'Per Role'];
 
 // ── Report columns ────────────────────────────────────────────
 const COLUMNS = [
@@ -56,6 +72,7 @@ const WRAP_COLUMNS    = [3, 4]; // Issue summary, Work Description
 const DESCRIPTION_COL = 4;
 const RATE_COL        = 6;
 const COST_COL        = 7;
+const FULLNAME_COL    = 8;
 const BILLABLE_COL    = 10;
 const PENDING_COL     = 11;
 const CONFIRM_COL     = 12;
@@ -65,7 +82,36 @@ const LABELS_COL      = 9;   // Task Category doubles as Labels for sync purpose
 
 const EDITABLE_COLS   = [DESCRIPTION_COL, LABELS_COL, BILLABLE_COL];
 
-const LAST_SYNCED_ROW = 10;
+/**
+ * Editable columns that actually participate in two-way sync for the given mode.
+ * In Per Role mode the Task Category (LABELS_COL) holds a Role, which has no
+ * ClickUp equivalent — so it is excluded from sync entirely (no Pending, no push).
+ */
+function syncEditableCols_(rateMode) {
+  if (rateMode === 'Per Role') return [DESCRIPTION_COL, BILLABLE_COL];
+  return EDITABLE_COLS;
+}
+
+/**
+ * Read Rate Mode without the full readConfig validation (safe inside onEdit,
+ * where token/team may be blank). Falls back to 'Per Task'.
+ */
+function readRateModeSafe_() {
+  try {
+    var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG_SHEET);
+    if (!sheet) return 'Per Task';
+    var values = sheet.getRange(2, 1, 13, 2).getValues();
+    for (var i = 0; i < values.length; i++) {
+      if (String(values[i][0] || '').trim() === 'Rate Mode') {
+        var m = String(values[i][1] || 'Per Task').trim();
+        return RATE_MODES.indexOf(m) === -1 ? 'Per Task' : m;
+      }
+    }
+  } catch (err) {}
+  return 'Per Task';
+}
+
+const LAST_SYNCED_ROW = 11;  // spreadsheet row of "Last synced" value cell (shifted +1 by Rate Mode row in v1.3.1)
 
 // Report sheet typography (Anek Tamil 11pt — may require adding the font via
 // Format → Font → More fonts the first time. Falls back to default if unavailable)
@@ -79,6 +125,7 @@ function onOpen() {
     .createMenu('ClickUp')
     .addItem('Refresh time entries',            'refreshTimeEntries')
     .addItem('Refresh tag list',                'refreshTagList')
+    .addItem('Refresh roles list',              'refreshRolesList')
     .addItem('Rebuild Dashboard',               'rebuildDashboard')
     .addItem('List all Lists with time entries','listAllListsWithEntries')
     .addSeparator()
@@ -109,6 +156,7 @@ function setupConfigSheet() {
     ['Custom end date',   '', 'Only used if Preset = Custom (YYYY-MM-DD), inclusive'],
     ['Include subtasks',  'Yes', 'Yes / No'],
     ['Billable filter',   'All', 'All / Billable only / Non-billable only'],
+    ['Rate Mode',         'Per Task', 'Per Task (rate from Tags) / Per Role (rate + role from Roles sheet)'],
     ['Last synced',       '', 'Auto-updated after a successful sync'],
     ['Client Name',       '', 'Appears in Dashboard title'],
     ['Month Label',       '', 'e.g. April 2026 — appears in Dashboard'],
@@ -135,6 +183,7 @@ function setupConfigSheet() {
   sheet.getRange('B5').setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(PRESETS, true).build());
   sheet.getRange('B8').setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(['Yes', 'No'], true).build());
   sheet.getRange('B9').setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(BILLABLE_FILTERS, true).build());
+  sheet.getRange('B10').setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(RATE_MODES, true).build());
 
   const preserved = Object.keys(existing).filter(k => k !== 'Setting').length;
   SpreadsheetApp.getActive().toast(
@@ -146,7 +195,7 @@ function setupConfigSheet() {
 function readConfig() {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG_SHEET);
   if (!sheet) throw new Error('No Config sheet. Run "Setup config sheet" first.');
-  const values = sheet.getRange(2, 1, 12, 2).getValues();
+  const values = sheet.getRange(2, 1, 13, 2).getValues();
   const map = {};
   values.forEach(([k, v]) => { map[k] = v; });
 
@@ -168,6 +217,7 @@ function readConfig() {
     customEnd:       map['Custom end date'],
     includeSubtasks: String(map['Include subtasks'] || 'Yes').trim().toLowerCase() === 'yes',
     billableFilter:  String(map['Billable filter'] || 'All').trim(),
+    rateMode:        (function(){ var m = String(map['Rate Mode'] || 'Per Task').trim(); return RATE_MODES.indexOf(m) === -1 ? 'Per Task' : m; })(),
     clientName:      String(map['Client Name'] || 'Client').trim(),
     monthLabel:      String(map['Month Label'] || '').trim(),
     skipIds:         skipIds,
@@ -443,9 +493,167 @@ function applyLabelsDropdown(dataSheet, firstRow, numRows) {
   dataSheet.getRange(firstRow, LABELS_COL, numRows, 1).setDataValidation(rule);
 }
 
+// ---------- Roles sheet with per-person Role + Rate ----------
+
+/**
+ * Roles sheet mirrors the Tags sheet pattern, with three columns:
+ *   A: Full Name  (read-only, script-managed)
+ *   B: Roles      (user-edited — the person's role label, e.g. "Project Delivery Lead")
+ *   C: Rate ($/hr) (user-edited — drives per-entry Cost when Rate Mode = Per Role)
+ * Roles AND Rates are preserved across refreshes. A person without a rate is treated
+ * as 0; a person without a role shows a blank Task Category in the Report.
+ * Used only when Config → Rate Mode = "Per Role". In that mode ALL rows are visible
+ * (tag mapping no longer governs visibility) and Task Category shows the Role.
+ */
+
+/**
+ * Menu action: full standalone scan of who logged time on the selected List,
+ * then write/merge the Roles sheet.
+ */
+function refreshRolesList() {
+  var cfg = readConfig();
+  if (!cfg.listId) throw new Error('Missing List ID in Config.');
+  SpreadsheetApp.getActive().toast('Scanning time entries for people...', 'ClickUp');
+
+  var range     = resolveDateRange(cfg);
+  var memberIds = getTeamMemberIds(cfg.token, cfg.teamId);
+  if (memberIds.length === 0) throw new Error('No team members found for this Team ID.');
+  var entries   = getTimeEntries(cfg.token, cfg.teamId, cfg.listId, range.startMs, range.endMs, memberIds);
+
+  var names  = collectPersonNames_(entries);
+  var result = writeRolesSheet_(names);
+  SpreadsheetApp.getActive().toast(
+    'Loaded ' + names.length + ' person(s). Preserved ' + result.preservedRoles + ' role(s) and ' +
+    result.preservedRates + ' rate(s). Fill in Roles and Rate; blank rate = $0 when Rate Mode is Per Role.',
+    'ClickUp', 10
+  );
+}
+
+/**
+ * Extract distinct Full Names from a set of time entries, sorted alphabetically.
+ * Full name uses the same field the Report does (username || email).
+ */
+function collectPersonNames_(entries) {
+  var seen = {};
+  (entries || []).forEach(function(e) {
+    var name = (e.user && (e.user.username || e.user.email)) || '';
+    name = String(name).trim();
+    if (name) seen[name] = true;
+  });
+  return Object.keys(seen).sort(function(a, b){ return a.toLowerCase().localeCompare(b.toLowerCase()); });
+}
+
+/**
+ * Write the Roles sheet, preserving existing Roles AND Rates. Merges any incoming
+ * names with names already present (so sync-time top-up never drops people).
+ * Always ensures the 3-column header (Full Name · Roles · Rate). Manually entered
+ * Roles values survive every refresh.
+ * Returns { preservedRoles: n, preservedRates: n }.
+ */
+function writeRolesSheet_(names) {
+  var ss    = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(DEVS_SHEET);
+  if (!sheet) sheet = ss.insertSheet(DEVS_SHEET);
+
+  // Preserve existing Roles, Rates, and names (union, so we never lose a person).
+  // Tolerant of an older 2-column layout (Full Name · Rate): if only 2 cols exist,
+  // treat col B as Rate and leave Role blank.
+  var existingRoles = {};
+  var existingRates = {};
+  if (sheet.getLastRow() > 1) {
+    var lastCol  = Math.max(sheet.getLastColumn(), 1);
+    var width    = Math.min(Math.max(lastCol, 2), 3);
+    var existing = sheet.getRange(2, 1, sheet.getLastRow() - 1, width).getValues();
+    existing.forEach(function(r) {
+      var nm = String(r[0] || '').trim();
+      if (!nm) return;
+      if (width >= 3) {
+        var role = String(r[1] || '').trim();
+        var rate = r[2];
+        if (role) existingRoles[nm] = role;
+        if (rate !== '' && rate !== null && rate !== undefined) existingRates[nm] = rate;
+      } else { // legacy 2-col: [Full Name, Rate]
+        var rate2 = r[1];
+        if (rate2 !== '' && rate2 !== null && rate2 !== undefined) existingRates[nm] = rate2;
+      }
+    });
+  }
+
+  // Union incoming names with any already on the sheet
+  var union = {};
+  (names || []).forEach(function(n){ if (n) union[n] = true; });
+  Object.keys(existingRoles).forEach(function(n){ union[n] = true; });
+  Object.keys(existingRates).forEach(function(n){ union[n] = true; });
+  var allNames = Object.keys(union).sort(function(a, b){ return a.toLowerCase().localeCompare(b.toLowerCase()); });
+
+  sheet.getProtections(SpreadsheetApp.ProtectionType.SHEET).forEach(function(p){ p.remove(); });
+  sheet.getProtections(SpreadsheetApp.ProtectionType.RANGE).forEach(function(p){ p.remove(); });
+  sheet.clear();
+  sheet.getRange(1, 1, 1, 3)
+    .setValues([['Full Name', 'Roles', 'Rate ($/hr)']])
+    .setFontWeight('bold')
+    .setBackground('#000000').setFontColor('#ffffff');
+
+  if (allNames.length > 0) {
+    var rows = allNames.map(function(n) {
+      return [n, existingRoles[n] || '', existingRates[n] !== undefined ? existingRates[n] : ''];
+    });
+    sheet.getRange(2, 1, rows.length, 3).setValues(rows);
+    sheet.getRange(2, 3, rows.length, 1).setNumberFormat('$#,##0.00');
+  }
+
+  sheet.setFrozenRows(1);
+  sheet.setColumnWidth(1, 240);
+  sheet.setColumnWidth(2, 220);
+  sheet.setColumnWidth(3, 120);
+
+  // Protect column A (Full Name) only — leave B (Roles) and C (Rate) editable
+  var colARange  = sheet.getRange(1, 1, Math.max(sheet.getMaxRows(), 1), 1);
+  var protection = colARange.protect().setDescription('Person names — managed by script');
+  protection.setWarningOnly(false);
+  var me = Session.getEffectiveUser();
+  protection.addEditor(me);
+  protection.removeEditors(protection.getEditors().filter(function(u){ return u.getEmail() !== me.getEmail(); }));
+  if (protection.canDomainEdit()) protection.setDomainEdit(false);
+
+  return { preservedRoles: Object.keys(existingRoles).length, preservedRates: Object.keys(existingRates).length };
+}
+
+/**
+ * Returns { fullNameLower: rate } for per-role rate lookup.
+ * Keyed by Full Name (lowercased). Missing/blank rate → resolves to 0 at lookup.
+ */
+function getRoleRateMap_() {
+  var ss    = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(DEVS_SHEET);
+  if (!sheet || sheet.getLastRow() < 2) return {};
+  var data = sheet.getRange(2, 1, sheet.getLastRow() - 1, 3).getValues();
+  var map  = {};
+  data.forEach(function(r){ if (r[0]) map[String(r[0]).toLowerCase().trim()] = Number(r[2]) || 0; });
+  return map;
+}
+
+/**
+ * Returns { fullNameLower: role } for per-role Task Category display.
+ * Keyed by Full Name (lowercased). Missing role → absent (blank category).
+ */
+function getRoleNameMap_() {
+  var ss    = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(DEVS_SHEET);
+  if (!sheet || sheet.getLastRow() < 2) return {};
+  var data = sheet.getRange(2, 1, sheet.getLastRow() - 1, 3).getValues();
+  var map  = {};
+  data.forEach(function(r){
+    var nm = String(r[0] || '').toLowerCase().trim();
+    var role = String(r[1] || '').trim();
+    if (nm && role) map[nm] = role;
+  });
+  return map;
+}
+
 // ---------- Transform ----------
 
-function entryToRow(e, tz, rateMap, tagForwardMap) {
+function entryToRow(e, tz, rateMap, tagForwardMap, rateMode, roleRateMap, roleNameMap) {
   var startDate = new Date(Number(e.start));
   var durHours  = Math.round((Number(e.duration || 0) / 3600000) * 100) / 100;
   var task      = e.task || {};
@@ -453,15 +661,27 @@ function entryToRow(e, tz, rateMap, tagForwardMap) {
   var displayId = task.custom_id || task.id || '';
   var billable  = e.billable === true;
 
-  // Rate: keep using raw first ClickUp tag for lookup (per-task rate logic preserved)
-  var rawTagNames = Array.isArray(e.tags) ? e.tags.map(function(t){ return t.name; }) : [];
-  var firstTag    = rawTagNames[0] || '';
-  var rate        = rateMap && firstTag ? (rateMap[firstTag.toLowerCase().trim()] || 0) : 0;
+  // Rate source + Task Category depend on Config → Rate Mode. The two modes are
+  // fully separated: Per Task is the fork's original behavior; Per Role is new.
+  var rate;
+  var category;
+  if (rateMode === 'Per Role') {
+    // Per Role: rate keyed by Full Name (blank/unknown = 0); Task Category = the
+    // person's Role from the Roles sheet (blank if no role). Tag mapping is NOT
+    // consulted for visibility or category — all rows surface.
+    var userKey = user.toLowerCase().trim();
+    rate     = (roleRateMap && userKey) ? (roleRateMap[userKey] || 0) : 0;
+    category = (roleNameMap && userKey) ? (roleNameMap[userKey] || '') : '';
+  } else {
+    // Per Task: first raw ClickUp tag → Tags sheet rate; Task Category = mapped tag
+    // Display Names only (unmapped tags hidden). Original fork logic, unchanged.
+    var rawTagNames = Array.isArray(e.tags) ? e.tags.map(function(t){ return t.name; }) : [];
+    var firstTag    = rawTagNames[0] || '';
+    rate     = rateMap && firstTag ? (rateMap[firstTag.toLowerCase().trim()] || 0) : 0;
+    category = mapTagsForDisplay_(e.tags || [], tagForwardMap || {});
+  }
 
-  // Task Category: only mapped tags, shown by Display Name; unmapped tags hidden
-  var displayTags = mapTagsForDisplay_(e.tags || [], tagForwardMap || {});
-
-  var snapshot = JSON.stringify({ description: e.description || '', tags: displayTags, billable: billable });
+  var snapshot = JSON.stringify({ description: e.description || '', tags: category, billable: billable });
 
   return [
     Utilities.formatDate(startDate, tz, 'yyyy-MM-dd'), // 1 Date
@@ -472,7 +692,7 @@ function entryToRow(e, tz, rateMap, tagForwardMap) {
     rate,                                               // 6 Rate
     '',                                                 // 7 Cost — formula written separately
     user,                                               // 8 Full name
-    displayTags,                                        // 9 Task Category (display names only)
+    category,                                           // 9 Task Category (tag Display Names, or Role in Per Role mode)
     billable,                                           // 10 Billable
     '',                                                 // 11 Pending
     false,                                              // 12 Confirm
@@ -527,6 +747,14 @@ function refreshTimeEntries(skipPendingCheck) {
   var rateMap = getTagRateMap_();
   var tagMaps = getTagMaps_();
 
+  // Auto-populate Developers sheet from this sync's entries (top-up, preserves rates),
+  // then read the per-role rate and role-name maps for Per Role mode.
+  // Auto-populate Roles sheet from this sync's entries (top-up, preserves Roles + Rates),
+  // then read the per-role rate and role-name maps for Per Role mode.
+  writeRolesSheet_(collectPersonNames_(entries));
+  var roleRateMap = getRoleRateMap_();
+  var roleNameMap = getRoleNameMap_();
+
   var ss    = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName(DATA_SHEET);
   if (!sheet) sheet = ss.insertSheet(DATA_SHEET);
@@ -534,13 +762,17 @@ function refreshTimeEntries(skipPendingCheck) {
 
   // Header — black background, white bold text, Anek Tamil
   var hdrRange = sheet.getRange(1, 1, 1, COLUMNS.length);
-  hdrRange.setValues([COLUMNS])
+  // Header labels are mode-aware: in Per Role mode col I reads "Role" instead of
+  // "Task Category" (the column then holds the person's Role). COLUMNS is not mutated.
+  var headerLabels = COLUMNS.slice();
+  if (cfg.rateMode === 'Per Role') headerLabels[LABELS_COL - 1] = 'Role';
+  hdrRange.setValues([headerLabels])
     .setFontWeight('bold')
     .setBackground('#000000').setFontColor('#ffffff')
     .setFontFamily(REPORT_FONT).setFontSize(REPORT_FONT_SIZE);
 
   if (entries.length > 0) {
-    var rows = entries.map(function(e){ return entryToRow(e, tz, rateMap, tagMaps.forward); });
+    var rows = entries.map(function(e){ return entryToRow(e, tz, rateMap, tagMaps.forward, cfg.rateMode, roleRateMap, roleNameMap); });
     sheet.getRange(2, 1, rows.length, COLUMNS.length).setValues(rows);
 
     sheet.getRange(2, BILLABLE_COL, rows.length, 1).insertCheckboxes();
@@ -554,26 +786,47 @@ function refreshTimeEntries(skipPendingCheck) {
       sheet.getRange(rn, COST_COL).setFormula('=IF(J' + rn + ',E' + rn + '*F' + rn + ',0)');
     }
 
-    applyLabelsDropdown(sheet, 2, rows.length);
+    // Task Category dropdown (tag Display Names) applies only in Per Task mode.
+    // In Per Role mode the column holds a Role and does not sync — clear any
+    // stale validation so it isn't constrained to tag names.
+    if (cfg.rateMode === 'Per Role') {
+      sheet.getRange(2, LABELS_COL, rows.length, 1).clearDataValidations();
+    } else {
+      applyLabelsDropdown(sheet, 2, rows.length);
+    }
 
     // Subtotals block
     var dataEnd = entries.length + 1; // last data row number
     var subRow  = entries.length + 3;
-    sheet.getRange(subRow,     4).setValue('Sub total Support Hours');
-    sheet.getRange(subRow,     5).setFormula('=SUM(E2:E' + dataEnd + ')');
-    sheet.getRange(subRow,     7).setFormula('=SUM(G2:G' + dataEnd + ')');
-    sheet.getRange(subRow + 1, 4).setValue('Total Hours Credit');
-    sheet.getRange(subRow + 1, 5).setFormula('=SUMIF(J2:J' + dataEnd + ',FALSE,E2:E' + dataEnd + ')');
-    sheet.getRange(subRow + 1, 7).setFormula('=SUMPRODUCT((J2:J' + dataEnd + '=FALSE)*E2:E' + dataEnd + '*F2:F' + dataEnd + ')');
-    sheet.getRange(subRow + 2, 4).setValue('Total Amount Due');
-    sheet.getRange(subRow + 2, 5).setFormula('=SUMIF(J2:J' + dataEnd + ',TRUE,E2:E' + dataEnd + ')');
-    sheet.getRange(subRow + 2, 7).setFormula('=SUM(G2:G' + dataEnd + ')');
-    sheet.getRange(subRow, 4, 3, 1).setFontWeight('bold');
-    sheet.getRange(subRow, 5, 3, 1).setFontWeight('bold');
-    sheet.getRange(subRow, 7, 3, 1).setFontWeight('bold');
-    // Format subtotal cost cells
-    sheet.getRange(subRow, 7, 3, 1).setNumberFormat('$#,##0.00');
-    sheet.getRange(subRow + 1, 7).setFontColor('#888888'); // credit value grayed out (informational)
+    var billableOnly = (cfg.billableFilter === 'Billable only');
+
+    if (billableOnly) {
+      // Billable only: every row is billable, so collapse to a single line.
+      // No credit row, no separate Amount Due row.
+      sheet.getRange(subRow, 4).setValue('Sub total Hours / Total Amount Due');
+      sheet.getRange(subRow, 5).setFormula('=SUM(E2:E' + dataEnd + ')');
+      sheet.getRange(subRow, 7).setFormula('=SUM(G2:G' + dataEnd + ')');
+      sheet.getRange(subRow, 4, 1, 1).setFontWeight('bold');
+      sheet.getRange(subRow, 5, 1, 1).setFontWeight('bold');
+      sheet.getRange(subRow, 7, 1, 1).setFontWeight('bold');
+      sheet.getRange(subRow, 7, 1, 1).setNumberFormat('$#,##0.00');
+    } else {
+      sheet.getRange(subRow,     4).setValue('Sub total Support Hours');
+      sheet.getRange(subRow,     5).setFormula('=SUM(E2:E' + dataEnd + ')');
+      sheet.getRange(subRow,     7).setFormula('=SUM(G2:G' + dataEnd + ')');
+      sheet.getRange(subRow + 1, 4).setValue('Total Hours Credit');
+      sheet.getRange(subRow + 1, 5).setFormula('=SUMIF(J2:J' + dataEnd + ',FALSE,E2:E' + dataEnd + ')');
+      sheet.getRange(subRow + 1, 7).setFormula('=SUMPRODUCT((J2:J' + dataEnd + '=FALSE)*E2:E' + dataEnd + '*F2:F' + dataEnd + ')');
+      sheet.getRange(subRow + 2, 4).setValue('Total Amount Due');
+      sheet.getRange(subRow + 2, 5).setFormula('=SUMIF(J2:J' + dataEnd + ',TRUE,E2:E' + dataEnd + ')');
+      sheet.getRange(subRow + 2, 7).setFormula('=SUM(G2:G' + dataEnd + ')');
+      sheet.getRange(subRow, 4, 3, 1).setFontWeight('bold');
+      sheet.getRange(subRow, 5, 3, 1).setFontWeight('bold');
+      sheet.getRange(subRow, 7, 3, 1).setFontWeight('bold');
+      // Format subtotal cost cells
+      sheet.getRange(subRow, 7, 3, 1).setNumberFormat('$#,##0.00');
+      sheet.getRange(subRow + 1, 7).setFontColor('#888888'); // credit value grayed out (informational)
+    }
   }
 
   sheet.setFrozenRows(1);
@@ -590,8 +843,9 @@ function refreshTimeEntries(skipPendingCheck) {
     sheet.getRange(2, 6, entries.length, 1).setNumberFormat('$#,##0.00');  // Rate
     sheet.getRange(2, 7, entries.length, 1).setNumberFormat('$#,##0.00');  // Cost
 
-    // Apply font across data rows + 3-row subtotal block
-    var bodyEndRow = entries.length + 1 + 3;
+    // Apply font across data rows + subtotal block (1 row if Billable only, else 3)
+    var subtotalRows = (cfg.billableFilter === 'Billable only') ? 1 : 3;
+    var bodyEndRow = entries.length + 1 + subtotalRows;
     sheet.getRange(2, 1, bodyEndRow - 1, COLUMNS.length)
       .setFontFamily(REPORT_FONT).setFontSize(REPORT_FONT_SIZE);
   }
@@ -649,7 +903,12 @@ function rebuildDashboard() {
 
   // ── Compute KPIs ──────────────────────────────────────────────
   var totalHours = 0, billableHours = 0, creditHours = 0, totalCost = 0, creditCost = 0;
-  var personMap = {}, categoryMap = {}, taskMap = {};
+  var personMap = {}, categoryMap = {}, taskMap = {}, roleMap = {};
+
+  // Per Role dashboard needs role labels keyed by Full Name. In Per Role mode the
+  // Report's Task Category already holds the Role, but we key off the Roles sheet
+  // directly so blank-category rows still attribute to the right role.
+  var roleNameMapDash = (cfg.rateMode === 'Per Role') ? getRoleNameMap_() : {};
 
   data.forEach(function(r) {
     var hours    = Number(r[4]) || 0;
@@ -668,6 +927,12 @@ function rebuildDashboard() {
       if (!personMap[person]) personMap[person] = { billable: 0, credit: 0 };
       if (isBill) personMap[person].billable += hours;
       else        personMap[person].credit   += hours;
+    }
+    // Role aggregation (Per Role dashboard) — billable hours only, grouped by role.
+    if (cfg.rateMode === 'Per Role' && isBill) {
+      var role = roleNameMapDash[person.toLowerCase().trim()] || '(no role)';
+      if (!roleMap[role]) roleMap[role] = 0;
+      roleMap[role] += hours;
     }
     if (category) {
       category.split(',').forEach(function(cat) {
@@ -708,22 +973,34 @@ function rebuildDashboard() {
   r++;
 
   // ── KPI block ─────────────────────────────────────────────────
-  // Layout mirrors reference merged-cell pairs: B:C, D:E, F:G, H:I (skip A)
-  // KPI 1=Total hours (B), KPI 2=Billable hours (D), KPI 3=Credit hours (F), KPI 4=% billable (H+)
+  // Full: Total (B:C), Billable (D:E), Credit (F:G), % billable (I).
+  // Billable only: keep all four card slots (so the warm band and % billable stay
+  // in place), but blank the Credit card content — the F:G slot renders empty.
+  var billableOnlyDash = (cfg.billableFilter === 'Billable only');
   var pct = totalHours > 0 ? billableHours / totalHours : 0;
+
   var kpiStartCols = [2, 4, 6, 9];   // B, D, F, I  (col I for % billable which spans more)
   var kpiSpans     = [2, 2, 2, 1];   // how many cols each KPI merges
-  var kpiLabels    = ['Total hours', 'Billable hours', 'Credit hours', '% billable'];
-  var kpiValues    = [Math.round(totalHours*100)/100, Math.round(billableHours*100)/100, Math.round(creditHours*100)/100, pct];
-  var kpiSubs      = [monthLabel, '$' + totalCost.toFixed(2), '$' + creditCost.toFixed(2), 'Of total hours worked'];
-  var kpiNumFmts   = ['0.0', '0.00', '0.00', '0.0%'];
+  var kpiLabels, kpiValues, kpiSubs, kpiNumFmts;
+  if (billableOnlyDash) {
+    kpiLabels  = ['Total hours', 'Billable hours', '', '% billable'];
+    kpiValues  = [Math.round(totalHours*100)/100, Math.round(billableHours*100)/100, '', pct];
+    kpiSubs    = [monthLabel, '$' + totalCost.toFixed(2), '', 'Of total hours worked'];
+    kpiNumFmts = ['0.0', '0.00', '0.00', '0.0%'];
+  } else {
+    kpiLabels  = ['Total hours', 'Billable hours', 'Credit hours', '% billable'];
+    kpiValues  = [Math.round(totalHours*100)/100, Math.round(billableHours*100)/100, Math.round(creditHours*100)/100, pct];
+    kpiSubs    = [monthLabel, '$' + totalCost.toFixed(2), '$' + creditCost.toFixed(2), 'Of total hours worked'];
+    kpiNumFmts = ['0.0', '0.00', '0.00', '0.0%'];
+  }
+  var kpiCount = kpiLabels.length;
 
-  // Paint col H (rows r, r+1, r+2) with the KPI background so the gap between
-  // the Credit hours card (F:G) and the % billable card (I) blends in seamlessly
+  // Paint the col-H spacer with the KPI background so the gap between the Credit
+  // card (F:G) and the % billable card (I) blends in as one band (both layouts).
   dashboard.getRange(r, 8, 3, 1).setBackground(DS.KPI_BG);
 
   // Label row
-  for (var i = 0; i < 4; i++) {
+  for (var i = 0; i < kpiCount; i++) {
     var rng = dashboard.getRange(r, kpiStartCols[i], 1, kpiSpans[i]);
     if (kpiSpans[i] > 1) rng.merge();
     rng.setValue(kpiLabels[i])
@@ -734,7 +1011,7 @@ function rebuildDashboard() {
   dashboard.setRowHeight(r, 18); r++;
 
   // Value row
-  for (var i = 0; i < 4; i++) {
+  for (var i = 0; i < kpiCount; i++) {
     var rng = dashboard.getRange(r, kpiStartCols[i], 1, kpiSpans[i]);
     if (kpiSpans[i] > 1) rng.merge();
     rng.setValue(kpiValues[i])
@@ -745,7 +1022,7 @@ function rebuildDashboard() {
   dashboard.setRowHeight(r, 18); r++;
 
   // Sub-label row
-  for (var i = 0; i < 4; i++) {
+  for (var i = 0; i < kpiCount; i++) {
     var rng = dashboard.getRange(r, kpiStartCols[i], 1, kpiSpans[i]);
     if (kpiSpans[i] > 1) rng.merge();
     rng.setValue(kpiSubs[i])
@@ -755,57 +1032,116 @@ function rebuildDashboard() {
   }
   dashboard.setRowHeight(r, 18); r += 2;
 
-  // ── Hours by person ───────────────────────────────────────────
-  dbBand_(dashboard, r, 8, 'Hours by person — billable vs credit'); r++;
-  dbHeaders_(dashboard, r, ['Person', 'Billable', 'Credit', 'Total'], [2, 3, 4, 5]); r++;
+  // ── Hours by person (Per Task) / Hours by role (Per Role) ─────
+  var isRoleMode = (cfg.rateMode === 'Per Role');
+  var personDataFirstRow, personRows;
 
-  var personRows = Object.keys(personMap).map(function(n) {
-    var p = personMap[n];
-    return [n, Math.round(p.billable*100)/100, Math.round(p.credit*100)/100, Math.round((p.billable+p.credit)*100)/100];
-  }).sort(function(a,b){ return b[3]-a[3]; });
+  if (isRoleMode) {
+    // Per Role: "Hours by role — billable". Single value column labeled "Total"
+    // (= billable hours only). Credit is excluded entirely from this section.
+    dbBand_(dashboard, r, 8, 'Hours by role — billable'); r++;
+    dbHeaders_(dashboard, r, ['Role', 'Total'], [2, 3]); r++;
 
-  var personDataFirstRow = r;
-  personRows.forEach(function(row) {
-    dbDataRow_(dashboard, r, [
-      {col:2, val:row[0], align:'left',  fmt:'',     bold:false},
-      {col:3, val:row[1], align:'right', fmt:'0.00', bold:false},
-      {col:4, val:row[2], align:'right', fmt:'0.00', bold:false},
-      {col:5, val:row[3], align:'right', fmt:'0.00', bold:true},
-    ]); r++;
-  });
+    personRows = Object.keys(roleMap).map(function(n) {
+      return [n, Math.round(roleMap[n]*100)/100];
+    }).sort(function(a,b){ return b[1]-a[1]; });
 
-  var bT=personRows.reduce(function(s,v){return s+v[1];},0);
-  var cT=personRows.reduce(function(s,v){return s+v[2];},0);
-  var tT=personRows.reduce(function(s,v){return s+v[3];},0);
-  dbTotalRow_(dashboard, r, 4, ['Total', Math.round(bT*100)/100, Math.round(cT*100)/100, Math.round(tT*100)/100],
-    [false, false, false, true], ['','0.00','0.00','0.00'], ['left','right','right','right']);
-  r++;
+    personDataFirstRow = r;
+    personRows.forEach(function(row) {
+      dbDataRow_(dashboard, r, [
+        {col:2, val:row[0], align:'left',  fmt:'',     bold:false},
+        {col:3, val:row[1], align:'right', fmt:'0.00', bold:true},
+      ]); r++;
+    });
 
-  // Person chart anchors at (personDataFirstRow - 2) and is ~280px tall (~14 rows).
+    var tRole = personRows.reduce(function(s,v){return s+v[1];},0);
+    dbTotalRow_(dashboard, r, 2, ['Total', Math.round(tRole*100)/100],
+      [false, true], ['','0.00'], ['left','right']);
+    r++;
+  } else if (billableOnlyDash) {
+    // Per Task + Billable only: no credit exists, so drop the Credit + separate
+    // Total columns. Show Person · Total (= billable hours), single-series chart.
+    dbBand_(dashboard, r, 8, 'Hours by person — billable'); r++;
+    dbHeaders_(dashboard, r, ['Person', 'Total'], [2, 3]); r++;
+
+    personRows = Object.keys(personMap).map(function(n) {
+      var p = personMap[n];
+      return [n, Math.round(p.billable*100)/100];
+    }).sort(function(a,b){ return b[1]-a[1]; });
+
+    personDataFirstRow = r;
+    personRows.forEach(function(row) {
+      dbDataRow_(dashboard, r, [
+        {col:2, val:row[0], align:'left',  fmt:'',     bold:false},
+        {col:3, val:row[1], align:'right', fmt:'0.00', bold:true},
+      ]); r++;
+    });
+
+    var tPers = personRows.reduce(function(s,v){return s+v[1];},0);
+    dbTotalRow_(dashboard, r, 2, ['Total', Math.round(tPers*100)/100],
+      [false, true], ['','0.00'], ['left','right']);
+    r++;
+  } else {
+    // Per Task: original "Hours by person — billable vs credit" (unchanged).
+    dbBand_(dashboard, r, 8, 'Hours by person — billable vs credit'); r++;
+    dbHeaders_(dashboard, r, ['Person', 'Billable', 'Credit', 'Total'], [2, 3, 4, 5]); r++;
+
+    personRows = Object.keys(personMap).map(function(n) {
+      var p = personMap[n];
+      return [n, Math.round(p.billable*100)/100, Math.round(p.credit*100)/100, Math.round((p.billable+p.credit)*100)/100];
+    }).sort(function(a,b){ return b[3]-a[3]; });
+
+    personDataFirstRow = r;
+    personRows.forEach(function(row) {
+      dbDataRow_(dashboard, r, [
+        {col:2, val:row[0], align:'left',  fmt:'',     bold:false},
+        {col:3, val:row[1], align:'right', fmt:'0.00', bold:false},
+        {col:4, val:row[2], align:'right', fmt:'0.00', bold:false},
+        {col:5, val:row[3], align:'right', fmt:'0.00', bold:true},
+      ]); r++;
+    });
+
+    var bT=personRows.reduce(function(s,v){return s+v[1];},0);
+    var cT=personRows.reduce(function(s,v){return s+v[2];},0);
+    var tT=personRows.reduce(function(s,v){return s+v[3];},0);
+    dbTotalRow_(dashboard, r, 4, ['Total', Math.round(bT*100)/100, Math.round(cT*100)/100, Math.round(tT*100)/100],
+      [false, false, false, true], ['','0.00','0.00','0.00'], ['left','right','right','right']);
+    r++;
+  }
+
+  // Chart anchors at (personDataFirstRow - 2) and is ~280px tall (~14 rows).
   // Push r past the chart bottom + 2-row buffer so the next section heading sits clear of it.
   r = Math.max(r, personDataFirstRow - 2 + 14) + 2;
 
-  // ── Hours by task category ─────────────────────────────────────
-  dbBand_(dashboard, r, 8, 'Hours by task category'); r++;
-  dbHeaders_(dashboard, r, ['Category', 'Hours'], [2, 3]); r++;
+  // ── Hours by task category (Per Task only; hidden in Per Role) ──
+  var catRows = [], catDataFirstRow = null;
+  if (!isRoleMode) {
+    dbBand_(dashboard, r, 8, 'Hours by task category'); r++;
+    dbHeaders_(dashboard, r, ['Category', 'Hours'], [2, 3]); r++;
 
-  var catRows = Object.keys(categoryMap).map(function(cat) {
-    return [cat, Math.round(categoryMap[cat]*100)/100];
-  }).sort(function(a,b){ return b[1]-a[1]; });
+    catRows = Object.keys(categoryMap).map(function(cat) {
+      return [cat, Math.round(categoryMap[cat]*100)/100];
+    }).sort(function(a,b){ return b[1]-a[1]; });
 
-  var catDataFirstRow = r;
-  catRows.forEach(function(row) {
-    dbDataRow_(dashboard, r, [
-      {col:2, val:row[0], align:'left',  fmt:'',     bold:false},
-      {col:3, val:row[1], align:'right', fmt:'0.00', bold:false},
-    ]); r++;
-  });
-  // Category chart anchors at (catDataFirstRow - 2) and is ~280px tall (~14 rows).
-  r = Math.max(r, catDataFirstRow - 2 + 14) + 2;
+    catDataFirstRow = r;
+    catRows.forEach(function(row) {
+      dbDataRow_(dashboard, r, [
+        {col:2, val:row[0], align:'left',  fmt:'',     bold:false},
+        {col:3, val:row[1], align:'right', fmt:'0.00', bold:false},
+      ]); r++;
+    });
+    // Category chart anchors at (catDataFirstRow - 2) and is ~280px tall (~14 rows).
+    r = Math.max(r, catDataFirstRow - 2 + 14) + 2;
+  }
 
   // ── Top 10 issues ──────────────────────────────────────────────
+  // Per Task: Issue · Hours · Type.  Per Role: Issue · Hours (Type column removed).
   dbBand_(dashboard, r, 8, 'Top 10 issues by hours'); r++;
-  dbHeaders_(dashboard, r, ['Issue', 'Hours', 'Type'], [2, 3, 4]); r++;
+  if (isRoleMode) {
+    dbHeaders_(dashboard, r, ['Issue', 'Hours'], [2, 3]); r++;
+  } else {
+    dbHeaders_(dashboard, r, ['Issue', 'Hours', 'Type'], [2, 3, 4]); r++;
+  }
 
   var top10 = Object.keys(taskMap).map(function(k) {
     return [taskMap[k].name, Math.round(taskMap[k].hours*100)/100, taskMap[k].category];
@@ -813,23 +1149,28 @@ function rebuildDashboard() {
 
   var top10DataFirstRow = r;
   top10.forEach(function(row) {
-    dbDataRow_(dashboard, r, [
+    var cells = [
       {col:2, val:row[0], align:'left',   fmt:'',     bold:false},
       {col:3, val:row[1], align:'right',  fmt:'0.00', bold:false},
-      {col:4, val:row[2], align:'center', fmt:'',     bold:false},
-    ]); r++;
+    ];
+    if (!isRoleMode) cells.push({col:4, val:row[2], align:'center', fmt:'', bold:false});
+    dbDataRow_(dashboard, r, cells); r++;
   });
 
-  // Wrap text on the Type column (col 4) for all top10 rows so long category lists fit
-  if (top10.length > 0) {
+  // Wrap text on the Type column (col 4) for all top10 rows so long category lists fit (Per Task only)
+  if (!isRoleMode && top10.length > 0) {
     dashboard.getRange(top10DataFirstRow, 4, top10.length, 1).setWrap(true);
   }
 
   // ── Charts ────────────────────────────────────────────────────
   dashboard.getCharts().forEach(function(c){ dashboard.removeChart(c); });
-  if (personRows.length > 0) addPersonChart_(dashboard, personDataFirstRow, personRows.length);
-  if (catRows.length > 0)    addCategoryChart_(dashboard, catDataFirstRow, catRows.length);
-  if (top10.length > 0)      addTop10Chart_(dashboard, top10DataFirstRow, top10.length);
+  if (personRows.length > 0) {
+    if (isRoleMode)            addRoleChart_(dashboard, personDataFirstRow, personRows.length, 'Hours by role — billable');
+    else if (billableOnlyDash) addRoleChart_(dashboard, personDataFirstRow, personRows.length, 'Hours by person — billable');
+    else                       addPersonChart_(dashboard, personDataFirstRow, personRows.length);
+  }
+  if (!isRoleMode && catRows.length > 0) addCategoryChart_(dashboard, catDataFirstRow, catRows.length);
+  if (top10.length > 0)                  addTop10Chart_(dashboard, top10DataFirstRow, top10.length);
 
   SpreadsheetApp.getActive().toast('Dashboard rebuilt.', 'ClickUp', 4);
 }
@@ -909,6 +1250,23 @@ function addPersonChart_(sheet, dataFirstRow, numPeople) {
     .setOption('vAxis', { textStyle: { fontSize: 11 } })
     .setOption('colors', ['#3c78d8', '#e06666'])
     .setOption('series', { 0: { labelInLegend: 'Billable' }, 1: { labelInLegend: 'Credit' } })
+    .setPosition(dataFirstRow - 2, 6, 0, 0)
+    .setOption('width', 520).setOption('height', 280)
+    .build();
+  sheet.insertChart(chart);
+}
+
+/** Chart 1b: single-series horizontal bar for the first section (Per Role, or Per Task+Billable only) */
+function addRoleChart_(sheet, dataFirstRow, numRows, title) {
+  var chart = sheet.newChart()
+    .setChartType(Charts.ChartType.BAR)
+    .addRange(sheet.getRange(dataFirstRow, 2, numRows, 1))
+    .addRange(sheet.getRange(dataFirstRow, 3, numRows, 1))
+    .setOption('title', title || 'Hours by role — billable')
+    .setOption('legend', { position: 'none' })
+    .setOption('hAxis', { title: 'Hours' })
+    .setOption('vAxis', { textStyle: { fontSize: 11 } })
+    .setOption('colors', ['#3c78d8'])
     .setPosition(dataFirstRow - 2, 6, 0, 0)
     .setOption('width', 520).setOption('height', 280)
     .build();
@@ -1018,7 +1376,7 @@ function onClickUpEdit(e) {
   var col = e.range.getColumn(), row = e.range.getRow();
   if (row < 2) return;
   if (e.range.getNumRows() > 1 || e.range.getNumColumns() > 1) return;
-  if (EDITABLE_COLS.indexOf(col) === -1) return;
+  if (syncEditableCols_(readRateModeSafe_()).indexOf(col) === -1) return;
   recomputePendingForRow_(sheet, row);
 }
 
@@ -1035,7 +1393,10 @@ function recomputePendingForRow_(sheet, row) {
   var currentBillable = rowValues[BILLABLE_COL - 1] === true;
   var diffs = [];
   if (currentDesc     !== String(snap.description || ''))           diffs.push('Desc');
-  if (normalizeTagString_(currentCategory) !== normalizeTagString_(snap.tags || '')) diffs.push('Tags');
+  // Task Category only participates in sync in Per Task mode; in Per Role it's a
+  // Role with no ClickUp equivalent, so never flag it as a pending Tags change.
+  if (readRateModeSafe_() !== 'Per Role' &&
+      normalizeTagString_(currentCategory) !== normalizeTagString_(snap.tags || '')) diffs.push('Tags');
   if (currentBillable !== (snap.billable === true))                  diffs.push('Billable');
   sheet.getRange(row, PENDING_COL).setValue(diffs.join(', '));
 }

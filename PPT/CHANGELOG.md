@@ -7,6 +7,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.4.2] — 2026-07-03
+
+### Changed
+
+- **Billable-only KPI strip:** instead of reflowing to three cards, the Dashboard now keeps all four card slots and simply **blanks the Credit card content** (the F:G slot renders empty). This keeps `% billable` in its original position (col I) and preserves the warm band layout, which reads better than a reflowed three-card strip. Revises the 1.4.1 behavior.
+
+---
+
+## [1.4.1] — 2026-07-03
+
+### Changed
+
+**Billable-only refinements (Report + Dashboard)**
+- When `Billable filter = Billable only`, the Report subtotal block collapses to a **single row** labeled `Sub total Hours / Total Amount Due` (hours in col E, amount in col G). The `Total Hours Credit` and separate `Total Amount Due` rows are omitted — every row is billable, so they'd be redundant.
+- When `Billable filter = Billable only`, the Dashboard **drops the Credit hours KPI card** and reflows the strip to three cards: Total (B:C), Billable (D:E), % billable (F:G). The col-H spacer bridge is only painted in the full four-card layout.
+- When `Billable filter = Billable only` (Per Task), the "Hours by person" section drops the **Credit** and separate **Total** columns → `Person · Total` (billable hours), with a single-series chart.
+
+**Per Role header label**
+- In `Rate Mode = Per Role`, the Report's column I header now reads **`Role`** instead of `Task Category` (header text only; `COLUMNS` is not mutated, column position and behavior unchanged).
+
+### Notes
+
+- These conditions stack cleanly: Billable only + Per Role yields the `Role` header, the collapsed single-row subtotal, the three-card KPI strip, and the already-billable role section.
+- Per Task with all/other filters and Per Role's core behavior are otherwise unchanged from 1.4.0.
+
+---
+
+## [1.4.0] — 2026-07-03
+
+### Changed
+
+**"Per Developer" rate mode reworked into "Per Role"**
+
+The 1.3.1 per-developer feature is generalized into a role-based billing profile. Rate Mode now offers `Per Task` (default, unchanged) and `Per Role`. The two modes are fully separated — Per Task retains the original fork behavior exactly; Per Role is a distinct profile that does not affect Per Task.
+
+- **Sheet renamed** `Developers` → **`Roles`** with a new middle column:
+  `Full Name` (col A, read-only) · **`Roles`** (col B, user-edited) · `Rate ($/hr)` (col C, user-edited).
+  Roles **and** Rates are preserved across refreshes. The writer tolerates an older 2-column layout and migrates it (col B treated as Rate, Role left blank).
+- **Menu item renamed** `Refresh developers list` → **`Refresh roles list`**.
+- **Config option relabeled** `Per Developer` → **`Per Role`**.
+
+**Per Role mode behavior**
+- **Rate** looked up from the Roles sheet by Full Name (blank/unknown = `$0`).
+- **Task Category (col I)** shows the person's **Role** (blank if no role) instead of mapped tag Display Names.
+- **All rows are visible** — tag mapping no longer governs row visibility in this mode.
+- **Task Category is excluded from two-way sync** — a Role has no ClickUp tag equivalent, so editing col I never marks the row Pending and never pushes. Work Description and Billable still sync normally. Enforced in both the edit handler and the Pending recompute (`syncEditableCols_`, mode-guarded diff).
+- The Task Category dropdown (tag Display Names) is applied only in Per Task mode; in Per Role mode any stale validation on col I is cleared.
+
+**Dashboard (Per Role only; Per Task dashboard unchanged)**
+- "Hours by person — billable vs credit" → **"Hours by role — billable"**: rows are roles, a single `Total` column = billable hours only (credit excluded), and the chart becomes single-series.
+- **"Hours by task category" section hidden.**
+- **Top 10 issues** drops the **Type** column (Issue · Hours only).
+
+### Notes
+
+- Per-task rate logic (first raw tag → Tags rate) remains distinct from upstream and unchanged.
+- The KPI cards, Cost formula, and credit-value tracking are identical in both modes.
+
+---
+
+## [1.3.1] — 2026-07-03
+
+### Added
+
+**Per-developer rate mode**
+- New **Developers** sheet mirroring the Tags sheet pattern: `Full Name` (col A, read-only, script-managed) · `Rate ($/hr)` (col B, user-edited). Rates are preserved across refreshes.
+- New Config option **Rate Mode**: `Per Task` (default) or `Per Developer`.
+  - `Per Task` — unchanged fork behavior: rate looked up from the Tags sheet by the entry's first raw ClickUp tag.
+  - `Per Developer` — rate looked up from the Developers sheet by Full Name. A developer with no rate resolves to `$0` and their rows still surface.
+- New menu item **Refresh developers list** (under *Refresh tag list*): standalone scan of who logged time on the selected List.
+- The Developers sheet is also auto-populated on every normal sync (top-up union — never drops existing people or rates).
+- **`SCRIPT_VERSION` constant** added below the header (`const SCRIPT_VERSION = '1.3.1'`) so the running version is greppable and identifiable when testing multiple copies. Standing rule: keep it in sync with the header comment + CHANGELOG on every release.
+
+### Notes
+
+- Only the *rate source* changes between modes. Cost formula (`=IF(J{n}, E{n}*F{n}, 0)`), credit-value tracking, and Task Category display are identical in both modes.
+- **The Tags sheet still governs Report row visibility in both modes** — unmapped-tag rows stay hidden regardless of Rate Mode.
+- Per-task rate logic (first raw tag → Tags rate) remains distinct from upstream and unchanged.
+
+### Fixed
+
+- `LAST_SYNCED_ROW` bumped 10 → 11 to track the Config row shift caused by inserting the Rate Mode row, so the sync timestamp no longer risks overwriting the Rate Mode cell. `readConfig` range widened 12 → 13 rows so the shifted Skip IDs row is still read.
+
+---
+
 ## [1.3.0] — 2026-06-03
 
 ### Changed
@@ -28,6 +113,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Section heading bars (Hours by person / Hours by task category / Top 10 issues by hours) no longer have the dark navy fill — they now render as plain bold 12pt dark text on the default sheet background, blending in with their surroundings.
 - Col I widened from 105pt → 125pt to give "% billable" and "Of total hours worked" more breathing room.
 - Top 10 issues `Type` column (col 4) now wraps text so long comma-joined category lists fit cleanly.
+- KPI strip: col H (rows 2-4) now shares the warm `#F4F2EC` background of the surrounding cards, so the spacer between "Credit hours" and "% billable" reads as one continuous band instead of a visible white gap.
+- Section spacing: each section now advances the cursor past its associated chart's bottom edge (`max(cursor, chartAnchor + 14) + 2`) so charts no longer overlap with the next section's heading regardless of how few rows the table has.
 
 ---
 

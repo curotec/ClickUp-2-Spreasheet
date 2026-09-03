@@ -5,6 +5,67 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.0] — 2026-09-03
+
+### Added
+- **Conditional "List" column on the Report.** When more than one ClickUp List is
+  selected in the Config `List ID` cell (via Google Sheets smart chips or a
+  comma-separated value), the Report now shows a leading **`List`** column so it's
+  clear which List each time entry belongs to. The column displays the List name
+  (e.g. `Support LCI`).
+- Multi-list selection resolver (`resolveListSelection_`): splits the `List ID` cell
+  into parts, resolves each to a numeric List ID (deduped), and builds an
+  ID → List-name map from the `Lists Found` sheet to populate the new column without
+  extra API calls (names come from each entry's `task_location`).
+- `getLayout_()` — a single source of truth for the Report's column layout. Every
+  sheet-touching function (refresh, summary block, diff/pending, sync, discard,
+  edit trigger, category dropdown) now derives its column indices from here.
+
+### Changed
+- The Report layout is now computed dynamically rather than from fixed column
+  constants. In multi-list mode all columns shift right by one and the summary
+  block's formulas retarget the Billed Hours column automatically (E → F). The
+  hidden `Entry ID` / `Snapshot` columns, checkboxes, protection-free editable
+  cells, and the two-way sync/diff all track the shift.
+
+### Notes
+- **Single-list Reports are unchanged** — byte-for-byte the same layout as 2.4.0
+  (no `List` column). The new column appears only when 2+ Lists are selected.
+- Detection of "which mode" is based on the Report header row (first cell = `List`),
+  so an existing sheet's sync/diff keeps working without a re-refresh.
+- Multi-list fetching itself already worked in 2.4.0 (ClickUp's time-entries endpoint
+  accepts comma-separated `list_id`); this release adds the disambiguating column and
+  makes the whole two-way workflow layout-aware.
+
+## [2.4.0] — 2026-09-01
+
+### Changed
+- **"List all Lists with time entries" is now "List all Lists."** The feature previously
+  inferred Lists from time entries in the selected period, so any List with no logged
+  time for that range never appeared. It now walks the ClickUp hierarchy
+  (Spaces → Folders → Lists, plus folderless Lists) and returns **every non-archived
+  List** in the workspace, regardless of activity.
+- The menu item and its function were renamed accordingly
+  (`listAllListsWithEntries` → `listAllLists`); all in-code references and error
+  messages were updated to match.
+
+### Added
+- Hierarchy API helpers: `getSpaces_`, `getFolders_`, `getFolderLists_`,
+  `getFolderlessLists_`, and `getAllListsHierarchy_`. All pass `archived=false`.
+- A second entry scan still runs after the hierarchy fetch to populate the
+  **`# entries`** and **`Total hours`** columns for the selected period. Lists with no
+  entries in the range show blank in those two columns (rather than `0`).
+- The completion toast now reports both the total List count and how many had entries
+  in the period.
+
+### Notes
+- **Archived Lists and Folders are excluded entirely** (not shown, not in the dropdown).
+- Sort order is unchanged in spirit — Lists with entries appear first (by count, desc);
+  the remaining zero-activity Lists follow, ordered alphabetically by display label.
+- Listing all Lists makes more API calls than before (one per Space for folders and
+  folderless Lists, plus the entry scan), so the operation is slightly slower on large
+  workspaces.
+
 ## [2.3.4] — 2026-07-01
 
 ### Fixed

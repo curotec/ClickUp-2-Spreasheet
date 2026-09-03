@@ -8,6 +8,10 @@ so nothing leaves the sheet by accident.
 ## Features
 
 - **One-click refresh** of time entries into a client-ready Report sheet.
+- **Multiple Lists at once**: put several Lists in the Config `List ID` cell
+  (Google Sheets smart chips or comma-separated). When more than one List is
+  selected, the Report adds a leading **`List`** column so each entry shows which
+  List it came from. A single List looks exactly as before (no extra column).
 - **Date presets**: current/previous month, current/previous quarter, custom.
 - **Billable filter**: all / billable only / non-billable only.
 - **Custom Task IDs** (e.g. `CTK-10334`) when the ClickApp is enabled,
@@ -30,8 +34,8 @@ so nothing leaves the sheet by accident.
 - A ClickUp workspace and a **personal API token** (`pk_...`):
   ClickUp avatar (bottom left) → **Settings → Apps → API Token → Generate**.
 - Your ClickUp **Team ID** (the number in the URL when you're in the workspace).
-- The **List ID** of the List you want to track. The script's "List all Lists
-  with time entries" helper makes this easy to find.
+- The **List ID** of the List you want to track. The script's "List all Lists"
+  helper makes this easy to find (it lists every non-archived List in the workspace).
 
 ## Installation
 
@@ -60,9 +64,11 @@ In order:
      Total Due block. Enter a number (e.g. `20`) to switch the summary to
      an overage layout: Total Hours, Target Contract Hours, Overage (hrs)
      `=MAX(0, Total − Target)`, and Overage at rate `=Overage × Rate`.
-3. **ClickUp → List all Lists with time entries** — populates the
-   `Lists Found` sheet and updates the `List ID` dropdown on Config.
+3. **ClickUp → List all Lists** — populates the `Lists Found` sheet with every
+   non-archived List in the workspace and updates the `List ID` dropdown on Config.
    Pick your List from the dropdown (shows name with Space/Folder path).
+   To report on several Lists at once, select multiple in the `List ID` cell
+   (smart chips or comma-separated) — the Report will add a `List` column.
 4. **ClickUp → Refresh tag list** — populates the `Tags` sheet with all
    workspace time-entry tags. Then fill in the **Display Name** column
    (column B) for each tag you want to appear in the Task Category
@@ -116,7 +122,7 @@ to sync first, discard and refresh, or cancel.
 | Sheet         | Purpose                                                      |
 |---------------|--------------------------------------------------------------|
 | `Config`      | Settings (token, IDs, preset, filters, rate, target hours). Editable. |
-| `Report`      | Main data output. Includes summary block. Editable (sync columns). |
+| `Report`      | Main data output. Includes summary block. Editable (sync columns). Adds a leading `List` column when multiple Lists are selected. |
 | `Tags`        | Tag mapping. Column A protected; column B (Display Name) editable. |
 | `Lists Found` | List discovery output. Protected — managed by the script.    |
 | `Change Log`  | Every sync attempt (success and failure). Protected. Capped at 5000 rows. |
@@ -127,7 +133,7 @@ to sync first, discard and refresh, or cancel.
 |--------------------------------------|------------------------------------------------------|
 | Refresh time entries                 | Re-fetches data for the current Config range/filters |
 | Refresh tag list                     | Re-fetches workspace tags into the `Tags` sheet      |
-| List all Lists with time entries     | Populates `Lists Found` for List ID discovery        |
+| List all Lists                       | Lists every non-archived List for List ID discovery  |
 | Sync pending changes                 | Confirms and pushes ticked Pending rows to ClickUp   |
 | Sync & Reload                        | Syncs all pending rows silently, then refreshes data |
 | Discard pending changes              | Reverts ticked / Pending rows to snapshot values     |

@@ -34,7 +34,7 @@ Open the spreadsheet, then go to **ClickUp → Setup config sheet**. Fill in the
 |---|---|
 | API Token | Your ClickUp personal API token (`pk_...`). Found under Profile → Apps. |
 | Team ID | Your ClickUp workspace ID. Visible in the URL: `app.clickup.com/{team_id}/...` |
-| List ID | Leave blank for now — populated via the list discovery step below. |
+| List ID | One or more Lists to pull, chosen from a dropdown. Multiple Lists require a one-time chip/multi-select toggle (see below). Populated via the list discovery step. |
 | Preset | Time range to pull. Defaults to `Previous month`. |
 | Custom start date | Used only when Preset = `Custom`. Format: `YYYY-MM-DD`. |
 | Custom end date | Used only when Preset = `Custom`. Inclusive. Format: `YYYY-MM-DD`. |
@@ -46,9 +46,18 @@ Open the spreadsheet, then go to **ClickUp → Setup config sheet**. Fill in the
 
 ### 3. Discover your lists
 
-Run **ClickUp → List all Lists with time entries**. This scans all entries in the configured date range and writes a `Lists Found` tab. It also populates the `List ID` dropdown in Config automatically.
+Run **ClickUp → List all Lists**. This enumerates every non-archived List in the workspace (via Spaces → Folders → Lists), writes a `Lists Found` tab, and populates the `List ID` dropdown in Config. Lists with no logged time in the current period still appear (with a blank entry count) so you can select a sprint before any time is logged to it. Archived Lists are excluded.
 
-Go to Config and select your list from the `List ID` dropdown.
+Go to Config and select your list(s) from the `List ID` dropdown.
+
+**Fetching multiple Lists (e.g. several sprints).** The `List ID` cell can hold more than one List, and a single sync pulls entries from all of them (merged and de-duplicated by Entry ID; the date range applies to every List). The first List you select is used wherever a single List is needed (Dashboard title, Roles refresh).
+
+To select more than one List, enable multi-select on the cell once (a one-time UI step — the Apps Script API can't set it from code):
+
+1. Select the `List ID` cell → **Data → Data validation**.
+2. Set **Display style** to **Chip** and enable **Allow multiple selections** → **Done**.
+
+Then pick your Lists as chips. A single selection works either way.
 
 ### 4. Set up tag mappings and billing rates
 
@@ -176,7 +185,7 @@ Every sync operation is logged in the **Change Log** sheet.
 | Refresh tag list | Sync tags from ClickUp; preserves existing rates |
 | Refresh roles list | Scan who logged time on the selected List; preserves existing per-person Roles and rates |
 | Rebuild Dashboard | Rebuild Dashboard from current Report data (no API call) |
-| List all Lists with time entries | Discover List IDs and populate the Config dropdown |
+| List all Lists | Enumerate all workspace Lists and populate the Config dropdown |
 | Sync pending changes | Push confirmed edits to ClickUp |
 | Sync & Reload | Sync all pending rows then refresh |
 | Discard pending changes | Revert edits to snapshot values |
@@ -186,6 +195,8 @@ Every sync operation is logged in the **Change Log** sheet.
 ---
 
 ## Report column reference
+
+When **more than one List** is selected, a display-only **List** column is prepended as column A (showing each entry's List name), and every column below shifts one to the right (Date → B, Issue Key → C, and so on). The List column is not editable and does not sync. With a single List selected, the layout is exactly as below.
 
 | # | Column | Source | Editable |
 |---|---|---|---|

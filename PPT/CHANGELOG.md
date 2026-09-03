@@ -7,6 +7,105 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.8.0] — 2026-09-02
+
+### Added
+
+- **Optional "List" column in the Report (multi-list mode).** When more than one List is selected, a **List** column is prepended as the first column of the Report, showing which List each time entry belongs to — so merged sprints are distinguishable at a glance. When a single List is selected the column is absent and the Report is laid out exactly as before.
+  - The List cell shows the **List name only** (e.g. `Sprint 2`).
+  - The column is **display-only**: it is not editable, not part of the Snapshot, and never participates in two-way sync (a time entry's List has no editable ClickUp field).
+
+### Changed (internal)
+
+- All Report column references now shift by a computed **List-column offset** (0 or 1). The write path derives the offset from Config (whether >1 List is selected); the **sync, edit-tracking, revert, and Dashboard read paths self-detect it from the Report's actual header row** (`A1 === "List"`). This means edits are read/written against the layout actually on the sheet, so a Report generated in one mode is still synced correctly even if the selection changed afterward.
+- Cost and subtotal formulas, checkbox insertion, hidden columns, wrap columns, number formats, the Task Category dropdown, and row highlighting all shift with the offset. Single-list output is byte-identical to 1.7.1.
+
+### Notes
+
+- No Config layout change. Existing single-List reports and their two-way sync are unaffected.
+- To see the List column, select two or more Lists in the `List ID` cell and run **Refresh time entries**.
+
+---
+
+## [1.7.1] — 2026-09-02
+
+### Fixed
+
+- **The "Lists Found" tab is no longer protected.** A leftover sheet/range protection (carried over from an earlier version) left the tab showing a lock icon. `sheet.clear()` does not remove protections, so the lock persisted across runs. **"List all Lists"** now strips any existing protection on the Lists Found tab before rewriting it, clearing the lock and self-healing if it ever reappears. Run **ClickUp → List all Lists** once to remove the lock.
+
+---
+
+## [1.7.0] — 2026-09-02
+
+### Changed
+
+- **"List all Lists" now enumerates every List in the workspace**, not only Lists with logged time in the selected period. The scan walks the ClickUp hierarchy (Spaces → Folders → Lists, plus folderless Lists) to build the full List set, then overlays entry counts / hours for the configured period. Lists with no entries in the period appear with a **blank count** so they can still be selected — useful for picking a sprint before any time is logged to it. (Ported from the upstream ClickUp-2-Spreadsheet list-discovery approach.)
+  - The menu item **"List all Lists with time entries"** is renamed to **"List all Lists"** (and the underlying function `listAllListsWithEntries` → `listAllLists`).
+  - **Archived** Spaces, Folders, and Lists are excluded from the dropdown.
+- **No more "unknown" List row.** The previous scan derived Lists from time entries, so an entry with a missing task location produced an `unknown` List in the dropdown. The hierarchy walk only lists real Lists; entries whose List isn't in the hierarchy are ignored when counting, so no `unknown` row is created.
+
+### Added
+
+- A prominent in-code reminder above `applyListIdDropdown_` documenting that native multi-select ("chip") mode is a one-time manual UI step on the List ID cell (the Apps Script API has no `setMultiSelect()`), so it isn't accidentally re-added.
+- List hierarchy helpers: `getSpaces_`, `getFolders_`, `getFolderLists_`, `getFolderlessLists_`, `getAllListsHierarchy_`.
+
+### Upgrade note
+
+- After installing, run **ClickUp → List all Lists** to repopulate the Lists Found tab and the List ID dropdown with the full workspace List set. (No Config layout change in this release.)
+
+---
+
+## [1.6.0] — 2026-09-02
+
+### Changed
+
+- **Multi-list selection.** The `List ID` cell can now hold several Lists at once (e.g. multiple sprints), and a single sync pulls time entries from all of them. This supersedes the `Additional List IDs` row introduced in 1.5.0.
+  - Entries from all selected Lists are merged and **de-duplicated by Entry ID**. The configured **date range still applies to every List**.
+  - The **first selected List** is used anywhere a single List is needed (Dashboard title, Roles refresh).
+  - Parsing is **comma-safe**: the cell value is matched against the known List labels from the Lists Found sheet (longest-first), so a List label that itself contains a comma is not split incorrectly. Raw numeric IDs fall back to a plain comma split.
+
+### Enabling multi-select (one-time UI step)
+
+The Apps Script data-validation API cannot enable native multi-select ("chip") dropdowns from code, so the script builds a **single-select** dropdown on the `List ID` cell. To pick more than one List, turn on multi-select once in the Sheets UI:
+
+1. Select the `List ID` cell → **Data → Data validation** (or right-click → Data validation).
+2. Set **Display style** to **Chip** and enable **Allow multiple selections**.
+3. Click **Done**.
+
+From then on you can select multiple Lists as chips. The script reads the multi-selected value correctly whether or not chip mode is on — a single selection still works as a plain dropdown.
+
+### Removed
+
+- The **Additional List IDs** Config row from 1.5.0 is removed. The Config layout returns to the 1.4.3 row positions, so `LAST_SYNCED_ROW` and the value-dropdown cells revert to their prior rows. This also fixes the data-validation misalignment that appeared when 1.5.0's inserted row shifted the dropdowns.
+
+### Upgrade note
+
+- After installing, run **ClickUp → Setup config sheet** once (re-lays the Config rows, preserves values by name), then **List all Lists with time entries** to (re)apply the List ID dropdown. Optionally enable chip multi-select via the UI step above, then select your Lists.
+- If you set anything in the 1.5.0 **Additional List IDs** cell, it is no longer read — select those Lists in the List ID cell instead.
+
+---
+
+## [1.5.0] — 2026-09-02
+
+### Added
+
+- **Multi-list fetch.** A new optional Config row, **Additional List IDs**, lets a single sync pull time entries from several Lists at once — e.g. selecting multiple sprints for one project. The primary **List ID** works exactly as before; any Lists named in **Additional List IDs** (comma-separated, using the same dropdown labels or raw numeric IDs) are fetched in addition to it.
+  - The ClickUp `time_entries` endpoint accepts only one `list_id` per request, so each List is fetched in turn and the results are merged.
+  - Merged entries are **de-duplicated by Entry ID**, so a time entry that surfaces through more than one List (overlapping tasks) is counted once. One ticket with many time entries keeps all of its rows.
+  - The configured **date range still applies to every List** — results are "these Lists, within this window."
+  - Two-way sync is unaffected: each entry carries its own task/entry IDs, so edits push back regardless of which List an entry came from.
+
+### Changed
+
+- `getTimeEntries` now accepts either a single List ID (unchanged behavior) or an array of List IDs. A single-element array is byte-identical to the old single-List path, so existing single-List configs behave exactly as before.
+- The Config sheet layout gains one row (**Additional List IDs**, inserted directly under **List ID**). Internal fixed-row references were shifted accordingly (`LAST_SYNCED_ROW` 11 → 12; Config value dropdowns; config read ranges).
+
+### Upgrade note
+
+- After installing, run **ClickUp → Setup config sheet** once. It re-lays the Config rows and preserves your existing values by setting name. Then run **List all Lists with time entries** so the new **Additional List IDs** cell picks up the dropdown of available Lists.
+
+---
+
 ## [1.4.3] — 2026-07-09
 
 ### Fixed

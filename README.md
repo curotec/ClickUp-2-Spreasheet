@@ -27,6 +27,8 @@ so nothing leaves the sheet by accident.
   at rate) instead of a flat Total Due.
 - **Full change log** of every sync attempt (success and failure).
 - **List discovery helper** to find the correct List ID by name.
+- **Extra Users**: include time logged by deactivated users / guests by listing
+  their ClickUp user IDs in the `Extra Users` tab (see below).
 
 ## Requirements
 
@@ -117,6 +119,24 @@ For a faster workflow when you trust your edits:
 If you refresh while changes are pending, a three-way dialog asks whether
 to sync first, discard and refresh, or cancel.
 
+## Extra Users (deactivated users and guests)
+
+ClickUp only returns time entries for the user IDs the script asks about, and the
+workspace member list it uses contains **active members only**. Time logged by
+someone who has since been deactivated (or is a guest) is therefore missing unless
+you list them explicitly.
+
+1. Run **Refresh time entries** (or **List all Lists**) once — the `Extra Users`
+   tab is created automatically.
+2. Put one numeric ClickUp **user ID** per row in column A. Column B is a free
+   note (e.g. `Dhiren Patel (deactivated)`) and is ignored by the script.
+   Rows starting with `#` are comments.
+3. Refresh. The completion toast shows how many extra users were included, and
+   warns (with row numbers) about any non-numeric IDs it skipped.
+
+Extra IDs apply to both Refresh and List all Lists. IDs that are already active
+members are harmless (deduped).
+
 ## Sheets created by the script
 
 | Sheet         | Purpose                                                      |
@@ -126,6 +146,7 @@ to sync first, discard and refresh, or cancel.
 | `Tags`        | Tag mapping. Column A protected; column B (Display Name) editable. |
 | `Lists Found` | List discovery output. Protected — managed by the script.    |
 | `Change Log`  | Every sync attempt (success and failure). Protected. Capped at 5000 rows. |
+| `Extra Users` | User IDs of deactivated users / guests to include. Editable (user-managed, not protected). Auto-created. |
 
 ## Menu reference
 
@@ -165,6 +186,13 @@ to sync first, discard and refresh, or cancel.
 - **Custom IDs.** `task.custom_id` can be `null` for tasks created before
   the Custom Task IDs ClickApp was enabled. Those rows show the internal
   task ID instead.
+- **Deactivated users need manual IDs.** The script cannot discover the IDs of
+  users who are no longer active members; add them to `Extra Users` by hand.
+  If a past period looks short compared to the ClickUp UI, check for missing
+  deactivated users first.
+- **List filter is exact.** A client's work can live in several Lists (e.g.
+  `Support` and `Project Development`). Select all of them in `List ID`, or the
+  Report will only show one List's time.
 - **5000-row Change Log cap.** Older rows roll off automatically. If you
   need long-term history, copy the sheet contents elsewhere periodically.
 

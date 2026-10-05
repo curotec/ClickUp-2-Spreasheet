@@ -1,6 +1,6 @@
 /**
  * ClickUp Time Entries → Google Sheet  |  Billing Fork
- * Version: 1.8.0  (2026-09-02)
+ * Version: 1.10.0  (2026-09-15)
  *
  * Fork of the upstream confirm-before-sync importer. Highlights vs upstream:
  *   - Tags sheet has three columns: Tag name (read-only) · Display Name · Rate ($/hr)
@@ -28,6 +28,12 @@
  *     selected List drives the Dashboard title / Roles refresh. When more than one
  *     List is selected, a display-only "List" column is prepended to the Report so
  *     each entry's List is visible; it never participates in two-way sync.
+ *   - Extra Users: ClickUp only returns time entries for the assignee IDs passed, and
+ *     /team/{id} lists ACTIVE members only — so time logged by deactivated/offboarded
+ *     users or guests is invisible unless their IDs are supplied. Put those numeric
+ *     user IDs in column A of the "Extra Users" tab (auto-created on first fetch);
+ *     they are merged into the assignee list for every fetch, deduped against the
+ *     active roster.
  *
  * Two-way sync (kept from upstream):
  *   - Confirm-before-sync editing of Work Description, Task Category, Billable
@@ -40,7 +46,7 @@
 
 // ---------- Constants ----------
 
-const SCRIPT_VERSION  = '1.8.0';           // keep in sync with header comment + CHANGELOG on every release
+const SCRIPT_VERSION  = '1.10.0';           // keep in sync with header comment + CHANGELOG on every release
 
 const CONFIG_SHEET    = 'Config';
 const DATA_SHEET      = 'Report';          // renamed from "Time Entries"
@@ -49,6 +55,7 @@ const TAGS_SHEET      = 'Tags';
 const DEVS_SHEET      = 'Roles';   // Full Name · Roles · Rate ($/hr); used when Rate Mode = Per Role
 const CHANGE_LOG_SHEET = 'Change Log';
 const DASHBOARD_SHEET = 'Dashboard';
+const EXTRA_USERS_SHEET = 'Extra Users';   // User ID · Name/Note — deactivated/guest assignees to also fetch
 const CHANGE_LOG_MAX_ROWS = 5000;
 const CLICKUP_BASE    = 'https://api.clickup.com/api/v2';
 
@@ -143,7 +150,7 @@ function readRateModeSafe_() {
   try {
     var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG_SHEET);
     if (!sheet) return 'Per Task';
-    var values = sheet.getRange(2, 1, 13, 2).getValues();
+    var values = sheet.getRange(2, 1, Math.max(sheet.getLastRow() - 1, 1), 2).getValues();
     for (var i = 0; i < values.length; i++) {
       if (String(values[i][0] || '').trim() === 'Rate Mode') {
         var m = String(values[i][1] || 'Per Task').trim();
@@ -170,6 +177,7 @@ function onOpen() {
     .addItem('Refresh tag list',                'refreshTagList')
     .addItem('Refresh roles list',              'refreshRolesList')
     .addItem('Rebuild Dashboard',               'rebuildDashboard')
+    .addItem('Toggle Dashboard build (on/off)', 'toggleBuildDashboard')
     .addItem('List all Lists',                  'listAllLists')
     .addSeparator()
     .addItem('Sync pending changes',  'syncPendingChanges')
@@ -183,6 +191,34 @@ function onOpen() {
 
 // ---------- Config ----------
 
+/**
+ * Toggle the Config "Build Dashboard" value between Yes and No. The Config cell is
+ * the single source of truth read by refreshTimeEntries; this menu item just flips
+ * it (and creates the row if an older Config predates it).
+ */
+function toggleBuildDashboard() {
+  var ss    = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(CONFIG_SHEET);
+  if (!sheet) { SpreadsheetApp.getUi().alert('Run "Setup config sheet" first.'); return; }
+  var lastRow = sheet.getLastRow();
+  var data = sheet.getRange(1, 1, lastRow, 2).getValues();
+  var rowNum = -1;
+  for (var i = 0; i < data.length; i++) {
+    if (String(data[i][0] || '').trim() === 'Build Dashboard') { rowNum = i + 1; break; }
+  }
+  if (rowNum === -1) {
+    // Older Config without the row — append it.
+    rowNum = lastRow + 1;
+    sheet.getRange(rowNum, 1, 1, 3).setValues([['Build Dashboard', 'Yes',
+      'Yes / No — build/update the Dashboard tab on refresh (manual "Rebuild Dashboard" always works)']]);
+    sheet.getRange('B' + rowNum).setDataValidation(
+      SpreadsheetApp.newDataValidation().requireValueInList(['Yes', 'No'], true).build());
+  }
+  var current = String(sheet.getRange(rowNum, 2).getValue() || 'Yes').trim().toLowerCase();
+  var next = (current === 'no') ? 'Yes' : 'No';
+  sheet.getRange(rowNum, 2).setValue(next);
+  SpreadsheetApp.getActive().toast('Build Dashboard set to ' + next + '.', 'ClickUp', 4);
+}
 function setupConfigSheet() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   let sheet = ss.getSheetByName(CONFIG_SHEET);
@@ -204,6 +240,7 @@ function setupConfigSheet() {
     ['Client Name',       '', 'Appears in Dashboard title'],
     ['Month Label',       '', 'e.g. April 2026 — appears in Dashboard'],
     ['Skip IDs',          '', 'Comma-separated custom task IDs to exclude from Report and Dashboard'],
+    ['Build Dashboard',   'Yes', 'Yes / No — build/update the Dashboard tab on refresh (manual "Rebuild Dashboard" always works)'],
   ];
 
   const existing = {};
@@ -223,10 +260,27 @@ function setupConfigSheet() {
   sheet.getRange(1, 1, 1, 3).setFontWeight('bold');
   sheet.setColumnWidth(1, 160); sheet.setColumnWidth(2, 240); sheet.setColumnWidth(3, 380);
 
-  sheet.getRange('B5').setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(PRESETS, true).build());
-  sheet.getRange('B8').setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(['Yes', 'No'], true).build());
-  sheet.getRange('B9').setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(BILLABLE_FILTERS, true).build());
-  sheet.getRange('B10').setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(RATE_MODES, true).build());
+  // Apply dropdowns by SETTING NAME, not by hardcoded row. merged may not be in a
+  // fixed row order (older sheets, future appends), so we look up each setting's row
+  // from what we just wrote and place its validation on the matching B-cell. This
+  // keeps every dropdown next to its label regardless of layout.
+  var rowByName = {};
+  merged.forEach(function(r, i){ var k = String(r[0] || '').trim(); if (k) rowByName[k] = i + 1; });
+  function applyDropdown_(settingName, options) {
+    var rn = rowByName[settingName];
+    if (!rn) return;
+    sheet.getRange(rn, 2).setDataValidation(
+      SpreadsheetApp.newDataValidation().requireValueInList(options, true).build()
+    );
+  }
+  applyDropdown_('Preset',          PRESETS);
+  applyDropdown_('Include subtasks', ['Yes', 'No']);
+  applyDropdown_('Billable filter', BILLABLE_FILTERS);
+  applyDropdown_('Rate Mode',       RATE_MODES);
+  applyDropdown_('Build Dashboard', ['Yes', 'No']);
+
+  // Ensure the Extra Users tab exists (for offboarded/deactivated/guest assignee IDs).
+  ensureExtraUsersSheet_();
 
   const preserved = Object.keys(existing).filter(k => k !== 'Setting').length;
   SpreadsheetApp.getActive().toast(
@@ -238,7 +292,7 @@ function setupConfigSheet() {
 function readConfig() {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG_SHEET);
   if (!sheet) throw new Error('No Config sheet. Run "Setup config sheet" first.');
-  const values = sheet.getRange(2, 1, 13, 2).getValues();
+  const values = sheet.getRange(2, 1, Math.max(sheet.getLastRow() - 1, 1), 2).getValues();
   const map = {};
   values.forEach(([k, v]) => { map[k] = v; });
 
@@ -281,6 +335,7 @@ function readConfig() {
     clientName:      String(map['Client Name'] || 'Client').trim(),
     monthLabel:      String(map['Month Label'] || '').trim(),
     skipIds:         skipIds,
+    buildDashboard:  String(map['Build Dashboard'] || 'Yes').trim().toLowerCase() !== 'no',
   };
 
   if (!cfg.token)  throw new Error('Missing API Token in Config.');
@@ -443,6 +498,100 @@ function getTeamMemberIds(token, teamId) {
   var data    = cuFetch('/team/' + teamId, token);
   var members = (data.team && data.team.members) || [];
   return members.map(function(m){ return m.user && m.user.id; }).filter(Boolean);
+}
+
+// ---------- Extra Users (deactivated / guest / offboarded assignees) ----------
+//
+// ClickUp's /team/{id} returns ACTIVE members only, and the time_entries endpoint
+// only returns entries for the assignee IDs you pass. So time logged by someone who
+// has since been offboarded/deactivated (or a guest not on the roster) is invisible
+// unless their numeric user ID is supplied explicitly. The "Extra Users" tab holds
+// those IDs; they are merged into the assignee list for every fetch.
+
+/**
+ * Ensure the "Extra Users" tab exists. Created with headers + one comment row
+ * (col A starting with "#" is treated as a comment). Not protected: user-managed.
+ * Returns { sheet, created }.
+ */
+function ensureExtraUsersSheet_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(EXTRA_USERS_SHEET);
+  if (sheet) return { sheet: sheet, created: false };
+  sheet = ss.insertSheet(EXTRA_USERS_SHEET);
+  sheet.getRange(1, 1, 1, 2).setValues([['User ID', 'Name / Note']])
+    .setFontWeight('bold').setBackground('#000000').setFontColor('#ffffff');
+  sheet.getRange(2, 1, 1, 2).setValues([[
+    '# Add numeric ClickUp user IDs below (one per row)',
+    'Column B is a free-text note; only column A is read',
+  ]]).setFontColor('#888888');
+  sheet.setFrozenRows(1);
+  sheet.setColumnWidth(1, 320);
+  sheet.setColumnWidth(2, 360);
+  return { sheet: sheet, created: true };
+}
+
+/**
+ * Parse raw column-A values into valid / invalid IDs. Pure (no Sheets calls)
+ * so it can be unit-tested.
+ *   - blank -> skipped silently
+ *   - starts with "#" -> comment, skipped silently
+ *   - digits only -> valid (deduped, order preserved)
+ *   - anything else -> invalid, reported with its sheet row number
+ * values: array of cell values from row `firstRow` downward.
+ */
+function parseExtraUserIds_(values, firstRow) {
+  var ids = [], seen = {}, invalid = [];
+  (values || []).forEach(function(v, i) {
+    var raw = (v == null) ? '' : String(v).trim();
+    if (raw === '' || raw.charAt(0) === '#') return;
+    if (/^\d+$/.test(raw)) {
+      if (!seen[raw]) { seen[raw] = true; ids.push(raw); }
+    } else {
+      invalid.push({ row: firstRow + i, value: raw });
+    }
+  });
+  return { ids: ids, invalid: invalid };
+}
+
+/**
+ * Read the Extra Users tab (creating it if absent).
+ * Returns { ids: [string], invalid: [{row, value}], created: bool }.
+ */
+function getExtraUserIds_() {
+  var res = ensureExtraUsersSheet_();
+  var sheet = res.sheet;
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return { ids: [], invalid: [], created: res.created };
+  var values = sheet.getRange(2, 1, lastRow - 1, 1).getValues().map(function(r){ return r[0]; });
+  var parsed = parseExtraUserIds_(values, 2);
+  return { ids: parsed.ids, invalid: parsed.invalid, created: res.created };
+}
+
+/**
+ * Merge active member IDs with extra IDs, deduped (string compare).
+ * Returns { ids, addedCount } where addedCount = extras not already active.
+ */
+function mergeAssigneeIds_(activeIds, extraIds) {
+  var seen = {}, out = [];
+  (activeIds || []).forEach(function(id){ var k = String(id); if (!seen[k]) { seen[k] = true; out.push(k); } });
+  var added = 0;
+  (extraIds || []).forEach(function(id){ var k = String(id); if (!seen[k]) { seen[k] = true; out.push(k); added++; } });
+  return { ids: out, addedCount: added };
+}
+
+/**
+ * One-line toast suffix describing Extra Users effects ('' when nothing to say).
+ */
+function extraUsersNote_(extra, addedCount) {
+  var parts = [];
+  if (extra.created) parts.push('"' + EXTRA_USERS_SHEET + '" tab created');
+  if (addedCount > 0) parts.push(addedCount + ' extra user(s) included');
+  if (extra.invalid.length > 0) {
+    var shown = extra.invalid.slice(0, 5).map(function(x){ return 'row ' + x.row + ' "' + truncate_(x.value, 20) + '"'; });
+    parts.push('\u26A0 ' + extra.invalid.length + ' invalid Extra Users ID(s) skipped: ' + shown.join(', ') +
+               (extra.invalid.length > 5 ? ', \u2026' : ''));
+  }
+  return parts.length ? ' ' + parts.join('. ') + '.' : '';
 }
 
 function getAllWorkspaceTags(token, teamId) {
@@ -667,15 +816,25 @@ function getTagMaps_() {
 /**
  * Convert ClickUp tag array → display string. Unmapped tags are hidden.
  */
+/**
+ * Build the Task Category string for an entry.
+ * Shows EVERY tag on the entry so multi-tag entries are visible: a tag with a
+ * Display Name in the Tags sheet is shown as that Display Name; a tag without one
+ * is shown as its raw ClickUp name. Comma-joined, order preserved.
+ *
+ * (Previously only mapped tags were shown, which hid extra unmapped tags — that
+ * concealment is what made a multi-tag entry look single-tagged while its rate,
+ * keyed off the first raw tag, silently resolved to 0.)
+ */
 function mapTagsForDisplay_(clickupTags, forwardMap) {
   if (!Array.isArray(clickupTags)) return '';
-  var mapped = [];
+  var out = [];
   clickupTags.forEach(function(t) {
-    var name    = t.name || t;
-    var display = forwardMap[name];
-    if (display) mapped.push(display);
+    var name = (t && t.name) ? t.name : t;
+    if (!name) return;
+    out.push(forwardMap[name] || name);   // Display Name if mapped, else raw name
   });
-  return mapped.join(', ');
+  return out.join(', ');
 }
 
 /**
@@ -722,14 +881,17 @@ function refreshRolesList() {
   var range     = resolveDateRange(cfg);
   var memberIds = getTeamMemberIds(cfg.token, cfg.teamId);
   if (memberIds.length === 0) throw new Error('No team members found for this Team ID.');
-  var entries   = getTimeEntries(cfg.token, cfg.teamId, cfg.listId, range.startMs, range.endMs, memberIds);
+  var extra  = getExtraUserIds_();
+  var merged = mergeAssigneeIds_(memberIds, extra.ids);
+  var entries   = getTimeEntries(cfg.token, cfg.teamId, cfg.listId, range.startMs, range.endMs, merged.ids);
 
   var names  = collectPersonNames_(entries);
   var result = writeRolesSheet_(names);
+  var extraNote = extraUsersNote_(extra, merged.addedCount);
   SpreadsheetApp.getActive().toast(
     'Loaded ' + names.length + ' person(s). Preserved ' + result.preservedRoles + ' role(s) and ' +
-    result.preservedRates + ' rate(s). Fill in Roles and Rate; blank rate = $0 when Rate Mode is Per Role.',
-    'ClickUp', 10
+    result.preservedRates + ' rate(s). Fill in Roles and Rate; blank rate = $0 when Rate Mode is Per Role.' + extraNote,
+    'ClickUp', extra.invalid.length > 0 ? 15 : 10
   );
 }
 
@@ -821,6 +983,64 @@ function writeRolesSheet_(names) {
   if (protection.canDomainEdit()) protection.setDomainEdit(false);
 
   return { preservedRoles: Object.keys(existingRoles).length, preservedRates: Object.keys(existingRates).length };
+}
+
+/**
+ * ADD-ONLY population of the Roles sheet, used by "Refresh time entries".
+ *
+ * Appends any incoming people who aren't already on the sheet to the BOTTOM, with a
+ * blank Role/Rate. It never rewrites, re-sorts, clears, or re-protects existing rows,
+ * so Roles (col B) and Rate (col C) that you've already filled in are physically left
+ * alone — a refresh can't wipe them.
+ *
+ * "Already present" is judged case-insensitively and trimmed, so accented or
+ * whitespace-variant names (e.g. "Santiago Muñoz") don't create duplicates.
+ *
+ * The full rebuild/merge (writeRolesSheet_) is reserved for the explicit
+ * "Refresh roles list" menu action.
+ *
+ * Returns the array of newly-added names (empty if none).
+ */
+function appendNewPeopleToRoles_(names) {
+  var ss    = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(DEVS_SHEET);
+
+  // If the sheet doesn't exist yet, fall back to a full build once (first run).
+  if (!sheet) { writeRolesSheet_(names); return []; }
+
+  // Build a set of existing names (lowercased + trimmed) from col A.
+  var existing = {};
+  if (sheet.getLastRow() > 1) {
+    var colA = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getValues();
+    colA.forEach(function(r){
+      var nm = String(r[0] || '').toLowerCase().trim();
+      if (nm) existing[nm] = true;
+    });
+  } else if (sheet.getLastRow() === 0) {
+    // Empty sheet (no header) — establish the header via a full build, then continue.
+    writeRolesSheet_(names);
+    return [];
+  }
+
+  // Figure out which incoming names are genuinely new (dedup incoming list too).
+  var seen  = {};
+  var toAdd = [];
+  (names || []).forEach(function(n){
+    var nm = String(n || '').trim();
+    if (!nm) return;
+    var key = nm.toLowerCase();
+    if (existing[key] || seen[key]) return;
+    seen[key] = true;
+    toAdd.push(nm);
+  });
+  if (toAdd.length === 0) return [];
+
+  // Append at the bottom — existing rows are never touched or moved.
+  var startRow = sheet.getLastRow() + 1;
+  var rows = toAdd.map(function(n){ return [n, '', '']; });
+  sheet.getRange(startRow, 1, rows.length, 3).setValues(rows);
+  sheet.getRange(startRow, 3, rows.length, 1).setNumberFormat('$#,##0.00');
+  return toAdd;
 }
 
 /**
@@ -942,8 +1162,10 @@ function refreshTimeEntries(skipPendingCheck) {
 
   var memberIds = getTeamMemberIds(cfg.token, cfg.teamId);
   if (memberIds.length === 0) throw new Error('No team members found for this Team ID.');
+  var extra  = getExtraUserIds_();
+  var merged = mergeAssigneeIds_(memberIds, extra.ids);
 
-  var entries = getTimeEntries(cfg.token, cfg.teamId, cfg.listIds, range.startMs, range.endMs, memberIds);
+  var entries = getTimeEntries(cfg.token, cfg.teamId, cfg.listIds, range.startMs, range.endMs, merged.ids);
   var totalFetched = entries.length;
   if (cfg.billableFilter === 'Billable only')     entries = entries.filter(function(e){ return e.billable === true; });
   else if (cfg.billableFilter === 'Non-billable only') entries = entries.filter(function(e){ return e.billable !== true; });
@@ -961,11 +1183,11 @@ function refreshTimeEntries(skipPendingCheck) {
   var rateMap = getTagRateMap_();
   var tagMaps = getTagMaps_();
 
-  // Auto-populate Developers sheet from this sync's entries (top-up, preserves rates),
-  // then read the per-role rate and role-name maps for Per Role mode.
-  // Auto-populate Roles sheet from this sync's entries (top-up, preserves Roles + Rates),
-  // then read the per-role rate and role-name maps for Per Role mode.
-  writeRolesSheet_(collectPersonNames_(entries));
+  // Add-only top-up of the Roles sheet: append any NEW people from this sync's
+  // entries to the bottom, never rewriting existing rows (so Roles/Rate you filled
+  // in are never wiped). The full rebuild lives in the "Refresh roles list" menu
+  // item. Per Role maps below read the Roles sheet directly, so this stays correct.
+  appendNewPeopleToRoles_(collectPersonNames_(entries));
   var roleRateMap = getRoleRateMap_();
   var roleNameMap = getRoleNameMap_();
 
@@ -973,6 +1195,14 @@ function refreshTimeEntries(skipPendingCheck) {
   var sheet = ss.getSheetByName(DATA_SHEET);
   if (!sheet) sheet = ss.insertSheet(DATA_SHEET);
   sheet.clear();
+  // sheet.clear() removes content + formats but NOT data validations. When the layout
+  // changes (single↔multi list, or Task Category hidden in Per Role), stale dropdowns
+  // would otherwise linger on cells that no longer mean the same thing — and on rows
+  // below the new data. Clear ALL validations across the whole sheet up front, then
+  // re-apply only the ones the current layout needs.
+  if (sheet.getMaxRows() > 0 && sheet.getMaxColumns() > 0) {
+    sheet.getRange(1, 1, sheet.getMaxRows(), sheet.getMaxColumns()).clearDataValidations();
+  }
 
   // Multi-list: prepend a "List" column (offset = 1) only when >1 List is selected.
   var off      = (cfg.listIds && cfg.listIds.length > 1) ? 1 : 0;
@@ -1016,11 +1246,9 @@ function refreshTimeEntries(skipPendingCheck) {
     }
 
     // Task Category dropdown (tag Display Names) applies only in Per Task mode.
-    // In Per Role mode the column holds a Role and does not sync — clear any
-    // stale validation so it isn't constrained to tag names.
-    if (cfg.rateMode === 'Per Role') {
-      sheet.getRange(2, col_(LABELS_COL, off), rows.length, 1).clearDataValidations();
-    } else {
+    // In Per Role mode the column holds a Role, doesn't sync, and is hidden below —
+    // all validations were already cleared for the whole sheet above, so nothing to do.
+    if (cfg.rateMode !== 'Per Role') {
       applyLabelsDropdown(sheet, 2, rows.length, off);
     }
 
@@ -1062,6 +1290,16 @@ function refreshTimeEntries(skipPendingCheck) {
   for (var c = 0; c < COLUMN_WIDTHS.length; c++) sheet.setColumnWidth(c + 1 + off, COLUMN_WIDTHS[c]);
   sheet.hideColumns(col_(ENTRY_ID_COL, off));
   sheet.hideColumns(col_(SNAPSHOT_COL, off));
+  // Per Role mode: the Task Category column holds the Role (already shown on the
+  // Dashboard and derivable from the Roles sheet) and doesn't sync — hide it to keep
+  // the Report clean. sheet.clear() does NOT reset column visibility, so we must
+  // explicitly show it again in Per Task mode (in case a prior Per Role run hid it).
+  // The column and all offset math stay intact; only its visibility changes.
+  if (cfg.rateMode === 'Per Role') {
+    sheet.hideColumns(col_(LABELS_COL, off));
+  } else {
+    sheet.showColumns(col_(LABELS_COL, off));
+  }
   WRAP_COLUMNS.forEach(function(colBase){
     sheet.getRange(1, col_(colBase, off), Math.max(sheet.getMaxRows(), 1), 1).setWrap(true);
   });
@@ -1080,10 +1318,16 @@ function refreshTimeEntries(skipPendingCheck) {
   }
 
   // Rebuild dependents
-  rebuildDashboard();
+  // Rebuild dependents — Dashboard build/update is skipped when Config
+  // "Build Dashboard" = No (the manual "Rebuild Dashboard" menu item still works).
+  // When skipped, any existing Dashboard tab is left as-is (may be stale).
+  if (cfg.buildDashboard) rebuildDashboard();
 
+  var dashNote   = cfg.buildDashboard ? '' : ' [Dashboard skipped]';
   var filterNote = cfg.billableFilter !== 'All' ? ' [' + cfg.billableFilter + ': ' + entries.length + '/' + totalFetched + ']' : '';
-  SpreadsheetApp.getActive().toast(entries.length + ' entries loaded (' + range.label + ')' + filterNote + '.', 'ClickUp', 5);
+  var extraNote  = extraUsersNote_(extra, merged.addedCount);
+  SpreadsheetApp.getActive().toast(entries.length + ' entries loaded (' + range.label + ')' + filterNote + dashNote + '.' + extraNote,
+    'ClickUp', extra.invalid.length > 0 ? 15 : 5);
 }
 
 // ---------- Dashboard ----------
@@ -1569,7 +1813,9 @@ function listAllLists() {
   SpreadsheetApp.getActive().toast('Scanning entries ' + range.label + ' for counts...', 'ClickUp');
   var memberIds = getTeamMemberIds(cfg.token, cfg.teamId);
   if (memberIds.length === 0) throw new Error('No team members found for this Team ID.');
-  var entries = getTimeEntries(cfg.token, cfg.teamId, null, range.startMs, range.endMs, memberIds);
+  var extra  = getExtraUserIds_();
+  var merged = mergeAssigneeIds_(memberIds, extra.ids);
+  var entries = getTimeEntries(cfg.token, cfg.teamId, null, range.startMs, range.endMs, merged.ids);
   entries.forEach(function(e) {
     var loc = e.task_location || {};
     var id  = String(loc.list_id || (e.task && e.task.list && e.task.list.id) || '');
@@ -1608,9 +1854,10 @@ function listAllLists() {
   applyListIdDropdown_(rows);
 
   var activeCount = rows.filter(function(r){ return r.count > 0; }).length;
+  var extraNote = extraUsersNote_(extra, merged.addedCount);
   SpreadsheetApp.getActive().toast(
-    'Found ' + rows.length + ' Lists (' + activeCount + ' with entries ' + range.label + '). Config "List ID" dropdown updated.',
-    'ClickUp', 6
+    'Found ' + rows.length + ' Lists (' + activeCount + ' with entries ' + range.label + '). Config "List ID" dropdown updated.' + extraNote,
+    'ClickUp', extra.invalid.length > 0 ? 15 : 6
   );
 }
 
@@ -1636,13 +1883,22 @@ function applyListIdDropdown_(rows) {
   var labels      = rows.map(function(r){ return buildListLabel_(r); });
   var configSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG_SHEET);
   if (!configSheet) return;
+  // Locate the "List ID" row by name (drift-proof), rather than assuming a fixed row.
+  var listIdRow = -1;
+  if (configSheet.getLastRow() > 0) {
+    var names = configSheet.getRange(1, 1, configSheet.getLastRow(), 1).getValues();
+    for (var i = 0; i < names.length; i++) {
+      if (String(names[i][0] || '').trim() === 'List ID') { listIdRow = i + 1; break; }
+    }
+  }
+  if (listIdRow === -1) return;
   // Single-select dropdown built from the available List labels. The Apps Script
   // DataValidationBuilder has no method to enable native multi-select ("chip") mode,
   // so that is turned on manually once in the Sheets UI (List ID cell → data
   // validation → Display style: Chip / Allow multiple selections). When multi-select
   // is on, Sheets stores the chosen Lists comma-joined; readConfig()/splitMultiSelect_
   // parse that back into individual Lists, so multiple-List sync works regardless.
-  configSheet.getRange('B4').setDataValidation(
+  configSheet.getRange(listIdRow, 2).setDataValidation(
     SpreadsheetApp.newDataValidation()
       .requireValueInList(labels, true)
       .setAllowInvalid(false)
@@ -1680,18 +1936,71 @@ function recomputePendingForRow_(sheet, row) {
   var currentDesc     = String(rowValues[col_(DESCRIPTION_COL, off) - 1] || '');
   var currentCategory = String(rowValues[col_(LABELS_COL, off) - 1]      || '');
   var currentBillable = rowValues[col_(BILLABLE_COL, off) - 1] === true;
+  var isPerRole = (readRateModeSafe_() === 'Per Role');
   var diffs = [];
   if (currentDesc     !== String(snap.description || ''))           diffs.push('Desc');
   // Task Category only participates in sync in Per Task mode; in Per Role it's a
   // Role with no ClickUp equivalent, so never flag it as a pending Tags change.
-  if (readRateModeSafe_() !== 'Per Role' &&
+  if (!isPerRole &&
       normalizeTagString_(currentCategory) !== normalizeTagString_(snap.tags || '')) diffs.push('Tags');
   if (currentBillable !== (snap.billable === true))                  diffs.push('Billable');
+
+  // Multi-tag conflict guard (Per Task only): if the row has a real change to push
+  // AND its Task Category resolves to more than one tag, prefix "Multi-tag". The row
+  // is then held from sync (see collectChanges_) until it is edited down to one tag.
+  // A multi-tag row with no pending change is left alone (no flag).
+  if (!isPerRole && diffs.length > 0 && isMultiTagConflict_(currentCategory)) {
+    diffs.unshift('Multi-tag');
+  }
   sheet.getRange(row, col_(PENDING_COL, off)).setValue(diffs.join(', '));
 }
 
 function normalizeTagString_(s) {
   return String(s || '').split(',').map(function(t){ return t.trim(); }).filter(Boolean).sort().join(',');
+}
+
+/**
+ * Count the tags in a Task Category string, comma-safely.
+ *
+ * Because both raw tag names and Display Names can themselves contain commas, a
+ * naive comma split can miscount. This matches the string against the known set of
+ * labels (Tags sheet Display Names + raw ClickUp tag names), longest-first, peeling
+ * off each recognised label. Anything left over is comma-split as a fallback.
+ * Used only to detect the multi-tag conflict (>1) — not for sync.
+ */
+function countCategoryTags_(categoryStr) {
+  var raw = String(categoryStr || '').trim();
+  if (!raw) return 0;
+
+  // Known labels: every Display Name and every raw tag name we know about.
+  var maps = getTagMaps_();
+  var known = {};
+  Object.keys(maps.forward).forEach(function(rawName){ known[rawName] = true; });     // raw ClickUp names
+  Object.keys(maps.reverse).forEach(function(displayName){ known[displayName] = true; }); // Display Names
+  var labels = Object.keys(known).sort(function(a, b){ return b.length - a.length; });    // longest first
+
+  var count = 0;
+  var rest  = raw;
+  while (rest.length > 0) {
+    rest = rest.replace(/^[\s,]+/, '');
+    if (!rest.length) break;
+    var matched = null;
+    for (var i = 0; i < labels.length; i++) {
+      if (labels[i] && rest.indexOf(labels[i]) === 0) { matched = labels[i]; break; }
+    }
+    if (matched) { count += 1; rest = rest.slice(matched.length); }
+    else {
+      // Unrecognised remainder — fall back to comma split for whatever is left.
+      rest.split(',').forEach(function(tok){ if (tok.trim()) count += 1; });
+      break;
+    }
+  }
+  return count;
+}
+
+/** True when a Task Category string resolves to more than one tag (a conflict). */
+function isMultiTagConflict_(categoryStr) {
+  return countCategoryTags_(categoryStr) > 1;
 }
 
 function countPendingRows_() {
@@ -1713,9 +2022,22 @@ function collectChanges_(requireConfirm) {
   var lastRow = sheet.getLastRow();
   var data    = sheet.getRange(2, 1, lastRow - 1, COLUMNS.length + off).getValues();
   var changes = [];
+  var blocked = [];
   data.forEach(function(r, idx) {
     var pending = String(r[col_(PENDING_COL, off) - 1] || '').trim();
     if (!pending) return;
+    // Rows with an unresolved multi-tag conflict are held from sync entirely
+    // (whole row: Desc/Billable/Category). Resolve by editing the Task Category
+    // cell down to a single tag, then sync again.
+    if (pending.indexOf('Multi-tag') !== -1) {
+      blocked.push({
+        rowInSheet: idx + 2,
+        entryId:    String(r[col_(ENTRY_ID_COL, off) - 1] || '').trim(),
+        taskId:     String(r[col_(2, off) - 1] || ''),
+        category:   String(r[col_(LABELS_COL, off) - 1] || ''),
+      });
+      return;
+    }
     if (requireConfirm && r[col_(CONFIRM_COL, off) - 1] !== true) return;
     var snap = null;
     try { snap = JSON.parse(r[col_(SNAPSHOT_COL, off) - 1] || '{}'); } catch (err) { snap = null; }
@@ -1731,7 +2053,7 @@ function collectChanges_(requireConfirm) {
       newBillable: r[col_(BILLABLE_COL, off) - 1] === true,
     });
   });
-  return { sheet: sheet, changes: changes };
+  return { sheet: sheet, changes: changes, blocked: blocked };
 }
 
 function executeSyncChanges_(changes, sheet) {
@@ -1797,7 +2119,20 @@ function executeSyncChanges_(changes, sheet) {
 
 function syncPendingChanges() {
   var result = collectChanges_(true);
-  if (result.changes.length === 0) { SpreadsheetApp.getActive().toast('No confirmed pending changes.', 'ClickUp'); return; }
+  var blocked = result.blocked || [];
+  if (result.changes.length === 0) {
+    if (blocked.length > 0) {
+      var brows = blocked.map(function(b){ return 'Row ' + b.rowInSheet + ' (' + b.entryId + '): [' + b.category + ']'; });
+      SpreadsheetApp.getUi().alert(
+        blocked.length + ' row(s) blocked — multi-tag conflict',
+        'These rows have more than one tag and will NOT sync until resolved. Edit each Task Category cell down to a single tag, then sync again:\n\n' + brows.join('\n'),
+        SpreadsheetApp.getUi().ButtonSet.OK
+      );
+      return;
+    }
+    SpreadsheetApp.getActive().toast('No confirmed pending changes.', 'ClickUp');
+    return;
+  }
   var ui = SpreadsheetApp.getUi();
   var lines = [];
   result.changes.slice(0, 10).forEach(function(c) {
@@ -1811,20 +2146,31 @@ function syncPendingChanges() {
     lines.push('Row ' + c.rowInSheet + ' (' + c.entryId + '): ' + summary);
   });
   if (result.changes.length > 10) lines.push('... and ' + (result.changes.length - 10) + ' more.');
+  if (blocked.length > 0) {
+    lines.push('');
+    lines.push('⚠ ' + blocked.length + ' row(s) BLOCKED (multi-tag) and will not sync — resolve to one tag each: ' +
+      blocked.map(function(b){ return 'Row ' + b.rowInSheet; }).join(', '));
+  }
   var resp = ui.alert('Sync ' + result.changes.length + ' change(s) to ClickUp?', lines.join('\n\n'), ui.ButtonSet.OK_CANCEL);
   if (resp !== ui.Button.OK) { SpreadsheetApp.getActive().toast('Sync cancelled.', 'ClickUp'); return; }
   var outcome = executeSyncChanges_(result.changes, result.sheet);
   var msg = 'Sync complete: ' + outcome.successCount + ' succeeded, ' + outcome.failCount + ' failed.';
+  if (blocked.length > 0) msg += ' ' + blocked.length + ' blocked (multi-tag).';
   if (outcome.failCount > 0) msg += ' See "' + CHANGE_LOG_SHEET + '" tab.';
   SpreadsheetApp.getActive().toast(msg, 'ClickUp', 8);
 }
 
 function syncAndReload() {
   var result = collectChanges_(false);
+  var blocked = result.blocked || [];
   if (result.changes.length > 0) {
     SpreadsheetApp.getActive().toast('Syncing ' + result.changes.length + ' change(s)...', 'ClickUp');
     var outcome = executeSyncChanges_(result.changes, result.sheet);
-    SpreadsheetApp.getActive().toast(outcome.successCount + ' synced, ' + outcome.failCount + ' failed. Refreshing...', 'ClickUp', 3);
+    var t = outcome.successCount + ' synced, ' + outcome.failCount + ' failed';
+    if (blocked.length > 0) t += ', ' + blocked.length + ' blocked (multi-tag)';
+    SpreadsheetApp.getActive().toast(t + '. Refreshing...', 'ClickUp', 3);
+  } else if (blocked.length > 0) {
+    SpreadsheetApp.getActive().toast(blocked.length + ' row(s) blocked (multi-tag) — resolve to one tag. Refreshing...', 'ClickUp', 4);
   }
   refreshTimeEntries(true);
 }

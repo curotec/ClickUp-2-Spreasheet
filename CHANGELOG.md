@@ -5,6 +5,39 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.0] — 2026-10-01
+
+### Added
+- **Extra Users tab** for including time logged by people who are no longer
+  active workspace members (deactivated users, guests). ClickUp's time-entries
+  endpoint only returns entries for the assignee IDs it is given, and
+  `/team/{id}` lists **active** members only — so before this release, time
+  logged by deactivated users was silently missing from every report.
+  Put their numeric ClickUp user IDs in column A of the `Extra Users` tab and
+  they are merged into the assignee list.
+- Applies to both **Refresh time entries** and **List all Lists**, so List
+  discovery counts match what the Report will actually fetch.
+- The `Extra Users` tab is **auto-created** (headers + a comment row) on the
+  first Refresh / List all Lists if it doesn't exist. It is not protected —
+  it is user-managed.
+- Completion toast reports how many extra users were included (only when > 0).
+- **Invalid ID warning:** non-numeric values in column A are skipped and listed
+  (row + value, first 5) in the completion toast, which stays up longer (15s)
+  when warnings are present. Refresh still completes.
+- `VERSION` constant in `Code.gs`, kept in sync with the header comment.
+
+### Notes
+- Column A rules: blank → skipped; starting with `#` → comment, skipped;
+  digits only → used (deduped, and deduped against active members);
+  anything else → warned and skipped. Column B is a free-text note, never read.
+- Verified against the live API before release: querying `time_entries` by a
+  deactivated user's ID returns their entries.
+
+### Upgrade note
+- Replace `Code.gs` and reload the sheet. Run **Refresh time entries** once to
+  create the `Extra Users` tab, then add the user IDs of any deactivated people
+  whose time should appear, and refresh again.
+
 ## [2.5.0] — 2026-09-03
 
 ### Added

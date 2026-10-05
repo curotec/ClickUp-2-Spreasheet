@@ -43,6 +43,7 @@ Open the spreadsheet, then go to **ClickUp → Setup config sheet**. Fill in the
 | Rate Mode | `Per Task` (rate from Tags sheet by first tag) or `Per Role` (rate + role from Roles sheet by Full Name). Defaults to `Per Task`. |
 | Client Name | Shown in the Dashboard title (e.g. `Acme Corp`). |
 | Month Label | Shown in the Dashboard header (e.g. `April 2026`). |
+| Build Dashboard | `Yes`/`No` (default `Yes`). When `No`, **Refresh time entries** skips building/updating the Dashboard tab (existing tab left as-is). Manual **Rebuild Dashboard** always works. Toggle via the menu too. |
 
 ### 3. Discover your lists
 
@@ -84,14 +85,14 @@ Config → **Rate Mode** selects one of two fully separate profiles. Per Task is
 | | `Per Task` *(default)* | `Per Role` |
 |---|---|---|
 | **Rate source** | Tags sheet, by the entry's first raw ClickUp tag | Roles sheet, by Full Name |
-| **Task Category (col I)** | Mapped tag Display Names (header: `Task Category`) | The person's **Role** from the Roles sheet, blank if no role (header: `Role`) |
+| **Task Category (col I)** | Mapped tag Display Names (header: `Task Category`) | Holds the person's **Role**, but the column is **hidden** in the Report (the Role is already on the Dashboard and in the Roles sheet) |
 | **Row visibility** | Rows with unmapped tags are hidden | **All rows visible** (tag mapping ignored) |
 | **Two-way sync of Task Category** | Yes — Display Name reverse-maps to a ClickUp tag | **No** — a Role has no ClickUp equivalent, so the column doesn't sync |
 | **Dashboard: first section** | Hours by person — billable vs credit | **Hours by role — billable** (single `Total` column = billable hours) |
 | **Dashboard: Hours by task category** | Shown | **Hidden** |
 | **Dashboard: Top 10 issues** | Issue · Hours · Type | Issue · Hours (**Type column removed**) |
 
-In **Per Role** mode, run **ClickUp → Refresh roles list** (or just sync — the Roles sheet is auto-populated from each sync). Fill in **Roles** (col B) and **Rate ($/hr)** (col C) per person. A person with no rate is treated as `$0`; a person with no role shows a blank Task Category. Both columns are preserved across refreshes.
+In **Per Role** mode, run **ClickUp → Refresh roles list** to (re)build the Roles sheet. A plain **Refresh time entries** also **adds any new people** to the bottom of the Roles sheet, but it never rewrites existing rows — so Roles and Rate you've already filled in are safe from being wiped. Fill in **Roles** (col B) and **Rate ($/hr)** (col C) per person. A person with no rate is treated as `$0`; a person with no role shows a blank Task Category. New people appear with blank Role/Rate until you set them.
 
 What's identical across both modes: the Cost formula (`=IF(J{n}, E{n}*F{n}, 0)`), credit-value tracking, Work Description and Billable two-way sync, and the KPI cards. Only the items in the table above differ.
 
@@ -173,6 +174,14 @@ Alternative flows:
 - **Sync & Reload** — syncs all pending rows (ignores Confirm), then refreshes from ClickUp.
 - **Discard pending changes** — reverts edits back to snapshot values without touching ClickUp.
 
+### Multi-tag conflicts (Per Task)
+
+The Per Task rate is keyed off an entry's *first* raw ClickUp tag, so an entry with more than one tag can resolve to the wrong rate (often $0). To make these visible and prevent a bad push:
+
+- Task Category shows **every** tag on the entry (mapped as Display Name, unmapped as raw name).
+- If such a row also has a pending edit, its `Pending` status is prefixed **`Multi-tag`** and the whole row is **held back from sync**. Blocked rows are listed in the sync dialog.
+- **To resolve:** edit the Task Category cell down to a single tag, then sync. The dropped tag is removed from the ClickUp time entry, the rate resolves correctly, and the row syncs normally.
+
 Every sync operation is logged in the **Change Log** sheet.
 
 ---
@@ -181,10 +190,11 @@ Every sync operation is logged in the **Change Log** sheet.
 
 | Menu item | What it does |
 |---|---|
-| Refresh time entries | Pull from ClickUp, write Report, rebuild Dashboard |
+| Refresh time entries | Pull from ClickUp, write Report, rebuild Dashboard; adds any new people to Roles (never rewrites existing rows) |
 | Refresh tag list | Sync tags from ClickUp; preserves existing rates |
 | Refresh roles list | Scan who logged time on the selected List; preserves existing per-person Roles and rates |
 | Rebuild Dashboard | Rebuild Dashboard from current Report data (no API call) |
+| Toggle Dashboard build (on/off) | Flip the Config `Build Dashboard` value between Yes and No |
 | List all Lists | Enumerate all workspace Lists and populate the Config dropdown |
 | Sync pending changes | Push confirmed edits to ClickUp |
 | Sync & Reload | Sync all pending rows then refresh |
@@ -208,7 +218,7 @@ When **more than one List** is selected, a display-only **List** column is prepe
 | F | Rate | Looked up from Tags sheet by first tag | — |
 | G | Cost | `=IF(Billable=TRUE, Hours×Rate, 0)` | — |
 | H | Full name | ClickUp user username or email | — |
-| I | Task Category | Display Names of mapped tags (unmapped tags hidden) | ✅ syncs to ClickUp |
+| I | Task Category | All tags on the entry — mapped tags as Display Name, unmapped as raw name (Per Task); the Role (Per Role) | ✅ syncs to ClickUp (Per Task) |
 | J | Billable | ClickUp billable flag | ✅ syncs to ClickUp |
 | K | Pending | Auto-computed diff status | — |
 | L | Confirm | Checkbox to approve sync | ✅ manual |

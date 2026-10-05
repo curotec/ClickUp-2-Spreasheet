@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.9.2] — 2026-09-11
+
+### Fixed
+
+- **"Refresh time entries" no longer wipes the Roles sheet.** Previously every refresh rebuilt the whole Roles sheet, and any Full Name that came back from ClickUp in a slightly different form (whitespace/accents/username vs display name) failed the name-match and lost its Roles/Rate — so hand-entered values in columns B and C were periodically cleared.
+
+### Changed
+
+- Refresh now **adds new people only** to the Roles sheet: any person found in the sync who isn't already listed is **appended to the bottom** with a blank Role/Rate. Existing rows are never rewritten, re-sorted, cleared, or re-protected, so Roles (col B) and Rate (col C) you've filled in are left completely untouched.
+  - "Already present" is matched case-insensitively and trimmed, so accented or whitespace-variant names (e.g. `Santiago Muñoz`) don't create duplicates.
+  - The full rebuild/merge still runs from the **Refresh roles list** menu item, unchanged — that remains the way to re-scan and reconcile the Roles sheet.
+  - New people are added silently (no prompt). In Per Role mode a newly-added person shows `$0` / blank role until you set their values.
+
+---
+
+## [1.9.1] — 2026-09-09
+
+### Fixed
+
+- **Config dropdowns now attach by setting name, not by hardcoded row.** In 1.9.0 the `Build Dashboard` validation was pinned to a fixed cell (and was off by one), so on Config sheets whose rows weren't in the exact expected order the dropdown landed on the wrong row. `setupConfigSheet` now looks up each setting's row from the sheet it just wrote and places every dropdown (Preset, Include subtasks, Billable filter, Rate Mode, Build Dashboard) next to its own label. The `List ID` dropdown is resolved the same way. This removes the fixed-row fragility that also caused earlier layout-shift bugs.
+
+### Upgrade note
+
+- Run **ClickUp → Setup config sheet** once. It re-lays the Config rows in order (preserving your values by name) and attaches every dropdown to the correct row.
+
+---
+
+## [1.9.0] — 2026-09-09
+
+### Added
+
+- **Dashboard build can be turned off.** A new Config row **Build Dashboard** (`Yes`/`No`, default `Yes`) controls whether the Dashboard tab is built/updated during **Refresh time entries**. When set to `No`, the refresh skips the Dashboard and leaves any existing Dashboard tab as-is (it may be stale). The manual **ClickUp → Rebuild Dashboard** menu item always works as an override regardless of this setting.
+  - Also added a menu item **ClickUp → Toggle Dashboard build (on/off)** that flips the Config value (the Config cell remains the single source of truth). If an older Config predates the row, the toggle appends it.
+
+### Changed
+
+- **Per Role mode now hides the Task Category column** in the Report. In Per Role mode that column holds the person's Role, which is already shown on the Dashboard and derivable from the Roles sheet — so it's hidden to keep the Report clean. The column and all internal offset math are unchanged (it is only hidden), and Per Task mode still shows it. Switching back to Per Task re-shows it on the next refresh.
+- **Stale data validations are cleared before each Report write.** `sheet.clear()` does not remove data validations, so old dropdowns could linger on cells after a layout change (single ↔ multi-list, or Task Category hidden in Per Role) and on rows below the new data. The Report now clears all validations across the whole sheet up front, then re-applies only what the current layout needs (the Task Category dropdown in Per Task mode).
+
+### Upgrade note
+
+- After installing, run **ClickUp → Setup config sheet** once to add the **Build Dashboard** row (existing values are preserved by name; the new row is appended last, so no other Config rows move). Alternatively, just use **Toggle Dashboard build (on/off)**, which creates the row if it's missing.
+
+---
+
+## [1.8.1] — 2026-09-03
+
+### Fixed
+
+- **Multi-tag entries no longer silently resolve to a $0 rate without warning.** In Per Task mode the rate is keyed off the entry's *first* raw ClickUp tag. If an entry had more than one tag and the first wasn't the rated one, the rate came out 0 — and because Task Category previously showed only *mapped* tags, the extra tag was invisible, so the cause was hard to spot.
+
+### Changed
+
+- **Task Category now shows every tag on the entry** (Per Task mode): mapped tags as their Display Name, unmapped tags as their raw ClickUp name, comma-joined. Multi-tag entries are now visible at a glance. (Per Role mode is unchanged — that column shows the Role.)
+- **Multi-tag rows are guarded from two-way sync.** When a row has a pending change *and* its Task Category resolves to more than one tag, its Pending status is prefixed **`Multi-tag`** and the entire row (Description / Billable / Task Category) is held back from syncing. The pre-sync dialog lists blocked rows. A multi-tag row with no pending edit is left alone.
+  - **Resolve in-sheet:** edit the Task Category cell down to a single tag. The `Multi-tag` flag clears and the row syncs normally — the existing tag diff removes the dropped tag from the ClickUp time entry.
+  - Tag counting for conflict detection matches against the known tag / Display-Name set (comma-safe), so tags whose names contain commas are counted correctly.
+
+### Notes
+
+- No layout change. Rate logic itself is unchanged (still first raw tag) — the fix is visibility plus a sync guard so a conflicted entry can't push until it's a clean single tag.
+
+---
+
 ## [1.8.0] — 2026-09-02
 
 ### Added

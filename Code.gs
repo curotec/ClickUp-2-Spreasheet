@@ -1,7 +1,7 @@
 /**
  * ClickUp Time Entries → Google Sheet (Report with confirm-before-sync)
  *
- * Version: 2.5.0
+ * Version: 2.6.0
  *
  * Workflow:
  *   1. Refresh time entries → loads data into the Report sheet.
@@ -19,15 +19,25 @@
  *   - "List all Lists"       →  pick a List from the Config dropdown (all Lists, active or not)
  *   - "Refresh tag list"     →  fill in Display Name mappings on Tags sheet
  *   - "Setup two-way sync"   →  installable onEdit trigger
+ *
+ * Extra Users (2.6.0): ClickUp only returns time entries for the assignee IDs
+ * you pass, and /team/{id} lists ACTIVE members only — so time logged by
+ * deactivated users / guests is invisible unless their IDs are supplied.
+ * Put those IDs in column A of the "Extra Users" tab (auto-created on first
+ * Refresh / List all Lists). They are merged into the assignee list.
  */
 
 // ---------- Constants ----------
+
+const VERSION = '2.6.0';
+
 
 const CONFIG_SHEET = 'Config';
 const DATA_SHEET = 'Report';
 const LISTS_SHEET = 'Lists Found';
 const TAGS_SHEET = 'Tags';
 const CHANGE_LOG_SHEET = 'Change Log';
+const EXTRA_USERS_SHEET = 'Extra Users';
 const CHANGE_LOG_MAX_ROWS = 5000;
 const CLICKUP_BASE = 'https://api.clickup.com/api/v2';
 
@@ -372,6 +382,94 @@ function getTeamMemberIds(token, teamId) {
   return members.map(function(m) { return m.user && m.user.id; }).filter(Boolean);
 }
 
+// ---------- Extra Users (deactivated / guest assignees) ----------
+
+/**
+ * Ensure the "Extra Users" tab exists. Created with headers + one comment row
+ * (col A starting with "#" is treated as a comment). Not protected: user-managed.
+ * Returns { sheet, created }.
+ */
+function ensureExtraUsersSheet_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(EXTRA_USERS_SHEET);
+  if (sheet) return { sheet: sheet, created: false };
+  sheet = ss.insertSheet(EXTRA_USERS_SHEET);
+  sheet.getRange(1, 1, 1, 2).setValues([['User ID', 'Name / Note']])
+    .setFontWeight('bold').setBackground(HEADER_BG).setFontColor(HEADER_FG);
+  sheet.getRange(2, 1, 1, 2).setValues([[
+    '# Add numeric ClickUp user IDs below (one per row)',
+    'Column B is a free-text note; only column A is read',
+  ]]).setFontColor('#888888');
+  sheet.setFrozenRows(1);
+  sheet.setColumnWidth(1, 320);
+  sheet.setColumnWidth(2, 360);
+  return { sheet: sheet, created: true };
+}
+
+/**
+ * Parse raw column-A values into valid / invalid IDs. Pure (no Sheets calls)
+ * so it can be unit-tested.
+ *   - blank -> skipped silently
+ *   - starts with "#" -> comment, skipped silently
+ *   - digits only -> valid (deduped, order preserved)
+ *   - anything else -> invalid, reported with its sheet row number
+ * values: array of cell values from row `firstRow` downward.
+ */
+function parseExtraUserIds_(values, firstRow) {
+  var ids = [], seen = {}, invalid = [];
+  (values || []).forEach(function(v, i) {
+    var raw = (v == null) ? '' : String(v).trim();
+    if (raw === '' || raw.charAt(0) === '#') return;
+    if (/^\d+$/.test(raw)) {
+      if (!seen[raw]) { seen[raw] = true; ids.push(raw); }
+    } else {
+      invalid.push({ row: firstRow + i, value: raw });
+    }
+  });
+  return { ids: ids, invalid: invalid };
+}
+
+/**
+ * Read the Extra Users tab (creating it if absent).
+ * Returns { ids: [string], invalid: [{row, value}], created: bool }.
+ */
+function getExtraUserIds_() {
+  var res = ensureExtraUsersSheet_();
+  var sheet = res.sheet;
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return { ids: [], invalid: [], created: res.created };
+  var values = sheet.getRange(2, 1, lastRow - 1, 1).getValues().map(function(r){ return r[0]; });
+  var parsed = parseExtraUserIds_(values, 2);
+  return { ids: parsed.ids, invalid: parsed.invalid, created: res.created };
+}
+
+/**
+ * Merge active member IDs with extra IDs, deduped (string compare).
+ * Returns { ids, addedCount } where addedCount = extras not already active.
+ */
+function mergeAssigneeIds_(activeIds, extraIds) {
+  var seen = {}, out = [];
+  (activeIds || []).forEach(function(id){ var k = String(id); if (!seen[k]) { seen[k] = true; out.push(k); } });
+  var added = 0;
+  (extraIds || []).forEach(function(id){ var k = String(id); if (!seen[k]) { seen[k] = true; out.push(k); added++; } });
+  return { ids: out, addedCount: added };
+}
+
+/**
+ * One-line toast suffix describing Extra Users effects ('' when nothing to say).
+ */
+function extraUsersNote_(extra, addedCount) {
+  var parts = [];
+  if (extra.created) parts.push('"' + EXTRA_USERS_SHEET + '" tab created');
+  if (addedCount > 0) parts.push(addedCount + ' extra user(s) included');
+  if (extra.invalid.length > 0) {
+    var shown = extra.invalid.slice(0, 5).map(function(x){ return 'row ' + x.row + ' "' + truncate_(x.value, 20) + '"'; });
+    parts.push('\u26A0 ' + extra.invalid.length + ' invalid Extra Users ID(s) skipped: ' + shown.join(', ') +
+               (extra.invalid.length > 5 ? ', \u2026' : ''));
+  }
+  return parts.length ? ' ' + parts.join('. ') + '.' : '';
+}
+
 function getAllWorkspaceTags(token, teamId) {
   var data = cuFetch('/team/' + teamId + '/time_entries/tags', token);
   return Array.isArray(data.data) ? data.data : [];
@@ -566,8 +664,10 @@ function refreshTimeEntries(skipPendingCheck) {
 
   var memberIds = getTeamMemberIds(cfg.token, cfg.teamId);
   if (memberIds.length === 0) throw new Error('No team members found for this Team ID.');
+  var extra = getExtraUserIds_();
+  var merged = mergeAssigneeIds_(memberIds, extra.ids);
 
-  var entries = getTimeEntries(cfg.token, cfg.teamId, cfg.listId, range.startMs, range.endMs, memberIds);
+  var entries = getTimeEntries(cfg.token, cfg.teamId, cfg.listId, range.startMs, range.endMs, merged.ids);
 
   var totalFetched = entries.length;
   if (cfg.billableFilter === 'Billable only') entries = entries.filter(function(e){ return e.billable === true; });
@@ -694,7 +794,9 @@ function refreshTimeEntries(skipPendingCheck) {
     .setBorder(true, true, true, true, false, false, '#000000', SpreadsheetApp.BorderStyle.SOLID);
 
   var filterNote = cfg.billableFilter !== 'All' ? ' [' + cfg.billableFilter + ': ' + entries.length + '/' + totalFetched + ']' : '';
-  SpreadsheetApp.getActive().toast(entries.length + ' entries loaded (' + range.label + ')' + filterNote + '.', 'ClickUp', 5);
+  var extraNote = extraUsersNote_(extra, merged.addedCount);
+  SpreadsheetApp.getActive().toast(entries.length + ' entries loaded (' + range.label + ')' + filterNote + '.' + extraNote,
+    'ClickUp', extra.invalid.length > 0 ? 15 : 5);
 }
 
 // ---------- Lists discovery ----------
@@ -716,7 +818,9 @@ function listAllLists() {
   SpreadsheetApp.getActive().toast('Scanning entries ' + range.label + ' for counts...', 'ClickUp');
   var memberIds = getTeamMemberIds(cfg.token, cfg.teamId);
   if (memberIds.length === 0) throw new Error('No team members found for this Team ID.');
-  var entries = getTimeEntries(cfg.token, cfg.teamId, null, range.startMs, range.endMs, memberIds);
+  var extra = getExtraUserIds_();
+  var merged = mergeAssigneeIds_(memberIds, extra.ids);
+  var entries = getTimeEntries(cfg.token, cfg.teamId, null, range.startMs, range.endMs, merged.ids);
   entries.forEach(function(e) {
     var loc = e.task_location || {};
     var id = String(loc.list_id || (e.task && e.task.list && e.task.list.id) || '');
@@ -752,7 +856,9 @@ function listAllLists() {
   applyListIdDropdown_(rows);
 
   var activeCount = rows.filter(function(r){ return r.count > 0; }).length;
-  SpreadsheetApp.getActive().toast('Found ' + rows.length + ' Lists (' + activeCount + ' with entries ' + range.label + '). See "' + LISTS_SHEET + '" tab. Config dropdown updated.', 'ClickUp', 6);
+  var extraNote = extraUsersNote_(extra, merged.addedCount);
+  SpreadsheetApp.getActive().toast('Found ' + rows.length + ' Lists (' + activeCount + ' with entries ' + range.label + '). See "' + LISTS_SHEET + '" tab. Config dropdown updated.' + extraNote,
+    'ClickUp', extra.invalid.length > 0 ? 15 : 6);
 }
 
 function buildListLabel_(r) {
